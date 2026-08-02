@@ -5,7 +5,10 @@ x-common-config: &common-config
     args:
       NANOBOT_CHANNELS: ${NANOBOT_CHANNELS:-whatsapp}
   volumes:
-    - ~/.nanobot:/home/nanobot/.nanobot
+    - /opt/nanobot-data:/home/nanobot/.nanobot
+    - /var/run/docker.sock:/var/run/docker.sock
+  group_add:
+    - "999"
   cap_drop:
     - ALL
 
