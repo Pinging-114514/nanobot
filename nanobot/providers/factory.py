@@ -207,6 +207,11 @@ def _make_provider_core(
         )
 
     provider.generation = preset.to_generation_settings()
+
+    # Bind vision capability flag + vision proxy config for the base-class hook.
+    provider.supports_vision = bool(getattr(p, "vision", False))
+    provider.vision_proxy = config.vision_proxy if config.vision_proxy.enabled else None
+    provider._providers_config = config.providers
     return provider
 
 
