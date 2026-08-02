@@ -208,6 +208,8 @@ class ProviderConfig(Base):
         "reasoning_split",
     )
 
+    vision: bool | None = None  # None=unknown (assume no vision); True=model accepts image input natively
+
     @field_validator("thinking_style")
     @classmethod
     def _validate_thinking_style(cls, v: str | None) -> str | None:
@@ -313,6 +315,27 @@ class ProvidersConfig(Base):
         return self
 
 
+class VisionProxyConfig(Base):
+    """Immersive image description for models without native vision support.
+
+    When enabled, images attached to messages are sent to a vision-capable
+    model (providers.<provider>) which produces a detailed text description;
+    the description is injected into the LLM context in place of the raw
+    image. Descriptions are cached on disk keyed by image content hash so
+    repeated / historical images are not re-analyzed.
+    """
+
+    enabled: bool = False
+    provider: str = "custom"  # config key in providers.* used as the vision model endpoint
+    model: str | None = None  # defaults to the provider's configured model
+    prompt_style: Literal["immersive", "concise"] = "immersive"
+    cache_enabled: bool = True
+    cache_path: str | None = None  # defaults to ~/.nanobot/vision_proxy_cache.json
+    cache_max_entries: int = Field(default=500, ge=10, le=5000)
+    max_images: int = Field(default=6, ge=1, le=20)  # per request
+    timeout_seconds: int = Field(default=180, ge=10, le=600)
+
+
 class HeartbeatConfig(Base):
     """Heartbeat service configuration (now backed by cron)."""
 
@@ -415,6 +438,7 @@ class Config(BaseSettings):
     channels: ChannelsConfig = Field(default_factory=ChannelsConfig)
     transcription: TranscriptionConfig = Field(default_factory=TranscriptionConfig)
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
+    vision_proxy: VisionProxyConfig = Field(default_factory=VisionProxyConfig)
     api: ApiConfig = Field(default_factory=ApiConfig)
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)

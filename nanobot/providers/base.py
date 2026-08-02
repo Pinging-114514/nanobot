@@ -378,6 +378,8 @@ class LLMProvider(ABC):
         self.api_key = api_key
         self.api_base = api_base
         self.generation: GenerationSettings = GenerationSettings()
+        self.supports_vision = False  # set by factory when the provider model is multimodal
+        self.vision_proxy: Any = None  # VisionProxyConfig or None
 
     def can_resume_conversation_state(
         self,
@@ -877,6 +879,27 @@ class LLMProvider(ABC):
             reasoning_effort = self.generation.reasoning_effort
 
         has_streamed_content = False
+
+        # Immersive vision proxy: replace image blocks with text descriptions
+        # for models without native vision support (before any request is sent,
+        # so non-vision models never receive raw images).
+        vision_proxy = self.vision_proxy
+        if (
+            vision_proxy is not None
+            and getattr(vision_proxy, "enabled", False)
+            and not self.supports_vision
+            and messages
+        ):
+            try:
+                from nanobot.vision_proxy import transform_messages
+
+                messages, _changed = await transform_messages(
+                    messages,
+                    proxy=vision_proxy,
+                    providers=getattr(self, "_providers_config", None),
+                )
+            except Exception as exc:  # never break the request path
+                logger.warning(f"vision_proxy: transform failed: {exc}")
 
         async def _tracking_delta(text: str) -> None:
             nonlocal has_streamed_content
