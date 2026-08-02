@@ -9,6 +9,7 @@ x-common-config: &common-config
     - /var/run/docker.sock:/var/run/docker.sock
   group_add:
     - "999"
+  user: "1000:1000"
   cap_drop:
     - ALL
 

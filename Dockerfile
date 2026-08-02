@@ -10,7 +10,7 @@ RUN mkdir -p /app/nanobot/web && npm run build
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
 
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends ca-certificates git bubblewrap openssh-client libmagic1 util-linux && \
+    apt-get install -y --no-install-recommends ca-certificates curl git bubblewrap openssh-client libmagic1 util-linux && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
