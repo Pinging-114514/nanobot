@@ -105,6 +105,7 @@ def make_channel():
     ch._app = FakeApp()
     ch._stream_bufs = {}
     ch._hint_bufs = {}
+    ch._reasoning_bufs = {}
     ch._typing_tasks = {}
     ch._message_threads = {}
     ch.logger = MagicMock()
@@ -116,6 +117,16 @@ def hint_msg(content: str) -> OutboundMessage:
         channel="telegram",
         chat_id="12345",
         event=ProgressEvent(content=content, tool_hint=True),
+        metadata={},
+        content=content,
+    )
+
+
+def reasoning_msg(content: str, is_end: bool = False) -> OutboundMessage:
+    return OutboundMessage(
+        channel="telegram",
+        chat_id="12345",
+        event=ProgressEvent(content=content, reasoning=True, reasoning_end=is_end),
         metadata={},
         content=content,
     )
@@ -161,6 +172,26 @@ async def main():
     assert len(sends2) == 1 and len(edits2) == 19
     last_text = (edits2[-1][2] if edits2 else sends2[0][1])
     assert "省略" in last_text, "cap overflow should show an omission line"
+
+    # Reasoning chunks rotate into their own '🧠' card, deleted on final answer
+    CALLS.clear()
+    ch3 = make_channel()
+    await ch3.send(hint_msg('spawn("查资料")'))
+    await ch3.send(reasoning_msg("先看看需求"))
+    await ch3.send(reasoning_msg("再检查代码"))
+    await ch3.send(reasoning_msg("", is_end=True))
+    r_sends = [c for c in CALLS if c[0] == "send"]
+    r_edits = [c for c in CALLS if c[0] == "edit"]
+    assert len(r_sends) == 2, f"hint + reasoning cards, got {len(r_sends)}"
+    assert "🧠" in r_sends[1][1] and "先看看需求" in r_sends[1][1]
+    assert len(r_edits) >= 1 and all(e[1] == 12345 for e in r_edits)
+    assert "再检查代码" in (r_edits[-1][2] if r_edits else r_sends[1][1])
+
+    # Final answer deletes BOTH the hint card and the reasoning card
+    await ch3.send(final_msg("最终回答"))
+    r_deletes = [c for c in CALLS if c[0] == "delete"]
+    assert len(r_deletes) == 2, f"expected 2 card deletes (hint+reasoning), got {r_deletes}"
+    assert ch3._hint_bufs.get(12345) is None and ch3._reasoning_bufs.get(12345) is None
 
     print("ALL HINT-CARD TESTS PASSED")
 

@@ -344,6 +344,7 @@ _SEND_MAX_RETRIES = 3
 _SEND_RETRY_BASE_DELAY = 0.5  # seconds, doubled each retry
 _STREAM_EDIT_INTERVAL_DEFAULT = 0.6  # min seconds between edit_message_text calls
 _HINT_MAX_LINES = 15  # max tool-call lines kept in the rotating hint card
+_REASONING_MAX_CHARS = 2500  # max reasoning text kept in the rotating thinking card
 
 
 @dataclass
@@ -476,6 +477,7 @@ class TelegramChannel(BaseChannel):
         self._bot_username: str | None = None
         self._stream_bufs: dict[str, _StreamBuf] = {}  # chat_id -> streaming state
         self._hint_bufs: dict[int, dict[str, Any]] = {}  # chat_id -> rotating tool-hint card {message_id, lines}
+        self._reasoning_bufs: dict[int, dict[str, Any]] = {}  # chat_id -> rotating reasoning card {message_id, text, last_edit}
         self._inbound_buffers: dict[str, list[_QueuedTelegramUpdate]] = {}
         self._inbound_workers: dict[str, asyncio.Task[None]] = {}
         self._rich_send_disabled: bool = False  # Latch off if Bot API < 10.1
@@ -838,6 +840,21 @@ class TelegramChannel(BaseChannel):
                     **thread_kwargs,
                 )
 
+        # Reasoning (thinking) chunks rotate into a single '🧠' card;
+        # deleted together with the hint card on the final answer.
+        # Handled outside the text block so empty reasoning_end deltas still
+        # trigger the final refresh edit.
+        if progress_event and (
+            progress_event.reasoning_delta
+            or progress_event.reasoning
+            or progress_event.reasoning_end
+        ):
+            await self._update_reasoning_buffer(
+                chat_id, msg.content or "", bool(progress_event.reasoning_end),
+                thread_kwargs,
+            )
+            return
+
         # Send text content
         if msg.content and msg.content != "[empty message]":
             # Tool hints rotate into a single per-chat card instead of one
@@ -990,18 +1007,60 @@ class TelegramChannel(BaseChannel):
             self.logger.warning("Tool hint card update failed: {}", e)
             self._hint_bufs.pop(chat_id, None)  # Recreate on next hint
 
-    async def _cleanup_hints(self, chat_id: int) -> None:
-        """Delete the rotating tool-hint card once the final answer is out."""
-        buf = self._hint_bufs.pop(chat_id, None)
-        if not buf or not buf.get("message_id"):
-            return
+    async def _update_reasoning_buffer(
+        self,
+        chat_id: int,
+        delta: str,
+        is_end: bool,
+        thread_kwargs: dict[str, int],
+    ) -> None:
+        """Rotate reasoning (thinking) chunks into a single '🧠' card."""
+        app = self._require_app()
+        buf = self._reasoning_bufs.get(chat_id)
+        text = (buf["text"] if buf else "") + (delta or "")
+        if len(text) > _REASONING_MAX_CHARS:
+            text = "… " + text[-_REASONING_MAX_CHARS:]
+        now = time.monotonic()
         try:
-            await self._call_with_retry(
-                self._app.bot.delete_message,
-                chat_id=chat_id, message_id=buf["message_id"],
-            )
-        except Exception:
-            pass  # Keep the card if deletion fails
+            if buf is None or not buf.get("message_id"):
+                sent = await self._call_with_retry(
+                    app.bot.send_message,
+                    chat_id=chat_id, text="🧠 思考中\n" + text,
+                    **thread_kwargs,
+                )
+                self._reasoning_bufs[chat_id] = {
+                    "message_id": sent.message_id, "text": text, "last_edit": now,
+                }
+            elif is_end or (now - buf["last_edit"]) >= _STREAM_EDIT_INTERVAL_DEFAULT:
+                await self._call_with_retry(
+                    app.bot.edit_message_text,
+                    chat_id=chat_id, message_id=buf["message_id"],
+                    text="🧠 思考中\n" + text,
+                )
+                buf["text"] = text
+                buf["last_edit"] = now
+            else:
+                # Throttled: accumulate without hitting the API each delta.
+                buf["text"] = text
+        except Exception as e:
+            self.logger.warning("Reasoning card update failed: {}", e)
+            self._reasoning_bufs.pop(chat_id, None)  # Recreate on next delta
+
+    async def _cleanup_hints(self, chat_id: int) -> None:
+        """Delete the rotating tool-hint and reasoning cards once the final answer is out."""
+        for buf in (
+            self._hint_bufs.pop(chat_id, None),
+            self._reasoning_bufs.pop(chat_id, None),
+        ):
+            if not buf or not buf.get("message_id"):
+                continue
+            try:
+                await self._call_with_retry(
+                    self._app.bot.delete_message,
+                    chat_id=chat_id, message_id=buf["message_id"],
+                )
+            except Exception:
+                pass  # Keep the card if deletion fails
 
     @staticmethod
     def _is_not_modified_error(exc: Exception) -> bool:

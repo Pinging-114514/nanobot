@@ -930,6 +930,7 @@ def _qr_register_inner(
 
 _STREAM_ELEMENT_ID = "streaming_md"
 _HINT_MAX_LINES = 15  # max tool-call lines kept in the rotating hint card
+_REASONING_MAX_CHARS = 2500  # max reasoning text kept in the rotating thinking card
 _NEW_SESSION_DIVIDER_CONTENT = json.dumps({
     "type": "divider",
     "params": {"divider_text": {"text": "New session started."}},
@@ -994,6 +995,7 @@ class FeishuChannel(BaseChannel):
         self._loop: asyncio.AbstractEventLoop | None = None
         self._stream_bufs: dict[str, _FeishuStreamBuf] = {}
         self._hint_bufs: dict[str, dict[str, Any]] = {}  # stream_key -> rotating hint card {message_id, lines}
+        self._reasoning_bufs: dict[str, dict[str, Any]] = {}  # stream_key -> rotating reasoning card {message_id, text, last_edit}
         self._bot_open_id: str | None = None
         self._background_tasks: set[asyncio.Task[Any]] = set()
         self._reaction_ids: dict[str, str] = {}  # message_id → reaction_id
@@ -2456,6 +2458,19 @@ class FeishuChannel(BaseChannel):
             # separate message so the user experience stays cohesive.
             progress_event = msg.event if isinstance(msg.event, ProgressEvent) else None
 
+            # Reasoning (thinking) chunks rotate into a single '🧠' card;
+            # recalled together with the hint card on the final answer.
+            if progress_event and (
+                progress_event.reasoning_delta
+                or progress_event.reasoning
+                or progress_event.reasoning_end
+            ):
+                await self._update_reasoning_card(
+                    msg.chat_id, msg.metadata, msg.content or "",
+                    bool(progress_event.reasoning_end),
+                )
+                return
+
             if progress_event and progress_event.tool_hint:
                 hint = (msg.content or "").strip()
                 if not hint:
@@ -2947,16 +2962,61 @@ class FeishuChannel(BaseChannel):
             self.logger.warning("Tool hint card update failed: {}", e)
             self._hint_bufs.pop(key, None)
 
+    async def _update_reasoning_card(
+        self, chat_id: str, metadata: dict[str, Any], delta: str, is_end: bool,
+    ) -> None:
+        """Rotate reasoning (thinking) chunks into a single '🧠' card."""
+        loop = asyncio.get_running_loop()
+        rid_type = "chat_id" if chat_id.startswith("oc_") else "open_id"
+        key = self._stream_key(chat_id, metadata)
+        buf = self._reasoning_bufs.get(key)
+        text = (buf["text"] if buf else "") + (delta or "")
+        if len(text) > _REASONING_MAX_CHARS:
+            text = "… " + text[-_REASONING_MAX_CHARS:]
+        now = time.monotonic()
+        content = "🧠 思考中\n" + text
+        try:
+            if buf is None or not buf.get("message_id"):
+                mid = await loop.run_in_executor(
+                    None, self._create_hint_card_sync, rid_type, chat_id, content,
+                )
+                if mid:
+                    self._reasoning_bufs[key] = {
+                        "message_id": mid, "text": text, "last_edit": now,
+                    }
+            elif is_end or (now - buf["last_edit"]) >= 1.0:
+                # Feishu can't patch arbitrary cards: recall + resend, throttled.
+                await loop.run_in_executor(
+                    None, self._recall_message_sync, buf["message_id"],
+                )
+                mid = await loop.run_in_executor(
+                    None, self._create_hint_card_sync, rid_type, chat_id, content,
+                )
+                if mid:
+                    buf["message_id"] = mid
+                    buf["text"] = text
+                    buf["last_edit"] = now
+                else:
+                    self._reasoning_bufs.pop(key, None)
+            else:
+                buf["text"] = text
+        except Exception as e:
+            self.logger.warning("Reasoning card update failed: {}", e)
+            self._reasoning_bufs.pop(key, None)
+
     async def _cleanup_hints(
         self, chat_id: str, metadata: dict[str, Any] | None = None,
     ) -> None:
-        """Delete the rotating tool-hint card once the final answer is out."""
+        """Delete the rotating tool-hint and reasoning cards once the final answer is out."""
         key = self._stream_key(chat_id, metadata or {})
-        buf = self._hint_bufs.pop(key, None)
-        if not buf or not buf.get("message_id"):
-            return
         loop = asyncio.get_running_loop()
-        try:
-            await loop.run_in_executor(None, self._recall_message_sync, buf["message_id"])
-        except Exception:
-            pass  # Keep the card if recall fails
+        for buf in (
+            self._hint_bufs.pop(key, None),
+            self._reasoning_bufs.pop(key, None),
+        ):
+            if not buf or not buf.get("message_id"):
+                continue
+            try:
+                await loop.run_in_executor(None, self._recall_message_sync, buf["message_id"])
+            except Exception:
+                pass  # Keep the card if recall fails

@@ -25,6 +25,7 @@ from nanobot.agent.tools.file_state import FileStates
 from nanobot.agent.tools.loader import ToolLoader
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.bus.events import InboundMessage
+from nanobot.bus.outbound_events import ProgressEvent, outbound_message_for_event
 from nanobot.bus.queue import MessageBus
 from nanobot.config.schema import AgentDefaults, ToolsConfig
 from nanobot.providers.base import LLMProvider
@@ -367,6 +368,11 @@ class SubagentManager:
         async def _on_checkpoint(payload: dict[str, Any]) -> None:
             status.phase = payload.get("phase", status.phase)
             status.iteration = payload.get("iteration", status.iteration)
+            # Surface subagent activity on the origin channel's rotating hint
+            # card (tool_hint events) so the user sees it is still working.
+            await self._publish_subagent_progress(
+                origin, label, status.iteration, origin_message_id,
+            )
 
         try:
             root = workspace_scope.project_path if workspace_scope is not None else self.workspace
@@ -420,6 +426,10 @@ class SubagentManager:
             status.phase = "done"
             status.stop_reason = result.stop_reason
 
+            await self._publish_subagent_progress(
+                origin, label, status.iteration, origin_message_id, done=True, ok=True,
+            )
+
             if result.stop_reason == "tool_error":
                 status.tool_events = list(result.tool_events)
                 final_result = self._format_partial_progress(result)
@@ -447,6 +457,9 @@ class SubagentManager:
             status.phase = "error"
             status.error = str(e)
             logger.exception("Subagent [{}] failed", task_id)
+            await self._publish_subagent_progress(
+                origin, label, status.iteration, origin_message_id, done=True, ok=False,
+            )
             final_result = f"Error: {e}"
             if announce:
                 await self._announce_result(
@@ -459,6 +472,40 @@ class SubagentManager:
                     origin_message_id,
                 )
             return final_result
+
+    async def _publish_subagent_progress(
+        self,
+        origin: _SubagentOrigin,
+        label: str,
+        iteration: int | None,
+        origin_message_id: str | None = None,
+        *,
+        done: bool = False,
+        ok: bool = True,
+    ) -> None:
+        """Publish subagent progress as a tool_hint so the origin channel's
+        rotating hint card shows it's still working."""
+        if self.bus is None:
+            return
+        if done:
+            marker = "✅" if ok else "❌"
+            content = f"{marker} 子代理 [{label}] 执行完成" if ok else f"{marker} 子代理 [{label}] 执行失败"
+        else:
+            content = f"🤖 子代理 [{label}] 执行中"
+            if iteration:
+                content += f" (第 {iteration} 轮)"
+        metadata: dict[str, Any] = {}
+        if origin_message_id:
+            metadata["message_id"] = origin_message_id
+        await self.bus.publish_outbound(
+            outbound_message_for_event(
+                channel=origin["channel"],
+                chat_id=origin["chat_id"],
+                event=ProgressEvent(content=content, tool_hint=True),
+                metadata=metadata,
+            )
+        )
+        logger.debug("Subagent progress -> {}: {}", origin["channel"], content)
 
     async def _announce_result(
         self,
