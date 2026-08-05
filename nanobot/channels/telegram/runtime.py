@@ -343,6 +343,7 @@ def _split_telegram_markdown_html(content: str, max_html_len: int) -> list[str]:
 _SEND_MAX_RETRIES = 3
 _SEND_RETRY_BASE_DELAY = 0.5  # seconds, doubled each retry
 _STREAM_EDIT_INTERVAL_DEFAULT = 0.6  # min seconds between edit_message_text calls
+_HINT_MAX_LINES = 15  # max tool-call lines kept in the rotating hint card
 
 
 @dataclass
@@ -474,6 +475,7 @@ class TelegramChannel(BaseChannel):
         self._bot_user_id: int | None = None
         self._bot_username: str | None = None
         self._stream_bufs: dict[str, _StreamBuf] = {}  # chat_id -> streaming state
+        self._hint_bufs: dict[int, dict[str, Any]] = {}  # chat_id -> rotating tool-hint card {message_id, lines}
         self._inbound_buffers: dict[str, list[_QueuedTelegramUpdate]] = {}
         self._inbound_workers: dict[str, asyncio.Task[None]] = {}
         self._rich_send_disabled: bool = False  # Latch off if Bot API < 10.1
@@ -838,7 +840,15 @@ class TelegramChannel(BaseChannel):
 
         # Send text content
         if msg.content and msg.content != "[empty message]":
-            render_as_blockquote = bool(progress_event and progress_event.tool_hint)
+            # Tool hints rotate into a single per-chat card instead of one
+            # message per tool call; the card is deleted once the final
+            # answer lands (_cleanup_hints below).
+            if progress_event and progress_event.tool_hint:
+                await self._update_hint_buffer(
+                    chat_id, msg.content, reply_params, thread_kwargs,
+                )
+                return
+
             buttons = cast(list[list[str]], getattr(msg, "buttons", None) or [])
             reply_markup = self._build_keyboard(buttons) if buttons else None
             text = msg.content
@@ -847,17 +857,16 @@ class TelegramChannel(BaseChannel):
                 text = f"{text}\n\n{self._buttons_as_text(buttons)}"
 
             # Bot API 10.1 rich fast-path: send raw markdown via sendRichMessage.
-            # All non-blockquote content tries rich first; _rich_send_disabled
-            # latches off permanently if the server doesn't support it.
+            # _rich_send_disabled latches off permanently if the server doesn't support it.
             if (
-                not render_as_blockquote
-                and self.config.rich_messages
+                self.config.rich_messages
                 and not getattr(self, "_rich_send_disabled", False)
             ):
                 rich_ok = await self._try_send_rich(
                     chat_id, text, reply_params, thread_kwargs, reply_markup,
                 )
                 if rich_ok:
+                    await self._cleanup_hints(chat_id)
                     return
 
             chunks = _split_telegram_markdown(text, TELEGRAM_MAX_MESSAGE_LEN)
@@ -865,9 +874,10 @@ class TelegramChannel(BaseChannel):
                 is_last = (i == len(chunks) - 1)
                 await self._send_text(
                     chat_id, chunk, reply_params, thread_kwargs,
-                    render_as_blockquote=render_as_blockquote,
+                    render_as_blockquote=False,
                     reply_markup=reply_markup if is_last else None,
                 )
+            await self._cleanup_hints(chat_id)
 
     async def _call_with_retry(
         self,
@@ -941,6 +951,58 @@ class TelegramChannel(BaseChannel):
                 self.logger.exception("Error sending message")
                 raise
 
+    async def _update_hint_buffer(
+        self,
+        chat_id: int,
+        hint: str,
+        reply_params: ReplyParameters | None,
+        thread_kwargs: dict[str, int],
+    ) -> None:
+        """Rotate tool hints into a single per-chat card (edit in place)."""
+        app = self._require_app()
+        buf = self._hint_bufs.get(chat_id)
+        lines = list(buf["lines"]) if buf else []
+        for ln in (hint or "").splitlines():
+            ln = ln.strip()
+            if ln:
+                lines.append(ln)
+        if len(lines) > _HINT_MAX_LINES:
+            dropped = len(lines) - _HINT_MAX_LINES
+            lines = lines[-_HINT_MAX_LINES:]
+            lines.insert(0, f"… 省略 {dropped} 条工具调用 …")
+        text = "🛠 执行中\n" + "\n".join(f"🔧 {ln}" for ln in lines)
+        try:
+            if buf is None or not buf.get("message_id"):
+                sent = await self._call_with_retry(
+                    app.bot.send_message,
+                    chat_id=chat_id, text=text,
+                    reply_parameters=reply_params,
+                    **thread_kwargs,
+                )
+                self._hint_bufs[chat_id] = {"message_id": sent.message_id, "lines": lines}
+            else:
+                await self._call_with_retry(
+                    app.bot.edit_message_text,
+                    chat_id=chat_id, message_id=buf["message_id"], text=text,
+                )
+                buf["lines"] = lines
+        except Exception as e:
+            self.logger.warning("Tool hint card update failed: {}", e)
+            self._hint_bufs.pop(chat_id, None)  # Recreate on next hint
+
+    async def _cleanup_hints(self, chat_id: int) -> None:
+        """Delete the rotating tool-hint card once the final answer is out."""
+        buf = self._hint_bufs.pop(chat_id, None)
+        if not buf or not buf.get("message_id"):
+            return
+        try:
+            await self._call_with_retry(
+                self._app.bot.delete_message,
+                chat_id=chat_id, message_id=buf["message_id"],
+            )
+        except Exception:
+            pass  # Keep the card if deletion fails
+
     @staticmethod
     def _is_not_modified_error(exc: Exception) -> bool:
         return isinstance(exc, BadRequest) and "message is not modified" in str(exc).lower()
@@ -973,6 +1035,7 @@ class TelegramChannel(BaseChannel):
             if stream_id is not None and buf.stream_id is not None and buf.stream_id != stream_id:
                 return
             self._stop_typing(chat_id)
+            await self._cleanup_hints(int_chat_id)
             if reply_to_message_id := meta.get("message_id"):
                 with suppress(ValueError):
                     await self._remove_reaction(chat_id, int(reply_to_message_id))

@@ -929,6 +929,7 @@ def _qr_register_inner(
 
 
 _STREAM_ELEMENT_ID = "streaming_md"
+_HINT_MAX_LINES = 15  # max tool-call lines kept in the rotating hint card
 _NEW_SESSION_DIVIDER_CONTENT = json.dumps({
     "type": "divider",
     "params": {"divider_text": {"text": "New session started."}},
@@ -992,6 +993,7 @@ class FeishuChannel(BaseChannel):
         self._processed_message_ids: OrderedDict[str, None] = OrderedDict()  # Ordered dedup cache
         self._loop: asyncio.AbstractEventLoop | None = None
         self._stream_bufs: dict[str, _FeishuStreamBuf] = {}
+        self._hint_bufs: dict[str, dict[str, Any]] = {}  # stream_key -> rotating hint card {message_id, lines}
         self._bot_open_id: str | None = None
         self._background_tasks: set[asyncio.Task[Any]] = set()
         self._reaction_ids: dict[str, str] = {}  # message_id → reaction_id
@@ -2312,6 +2314,8 @@ class FeishuChannel(BaseChannel):
                 if self.config.done_emoji:
                     await self._add_reaction(message_id, self.config.done_emoji)
 
+            await self._cleanup_hints(chat_id, meta)
+
             buf = self._stream_bufs.pop(stream_key, None)
             if not buf or not buf.text:
                 return
@@ -2466,27 +2470,9 @@ class FeishuChannel(BaseChannel):
                         metadata=msg.metadata,
                     )
                     return
-                # No active streaming card — send as a regular interactive card
-                # with the same 🔧 prefix style. Existing topics stay threaded;
-                # new topics are created only when reply-to-message is enabled.
-                card = json.dumps(
-                    {"config": {"wide_screen_mode": True}, "elements": [
-                        {"tag": "markdown", "content": self._format_tool_hint_delta(hint)},
-                    ]},
-                    ensure_ascii=False,
-                )
-                _th_msg_id = self._thread_reply_target(msg.metadata)
-                if _th_msg_id:
-                    await loop.run_in_executor(
-                        None, lambda: self._reply_message_sync(
-                            _th_msg_id, "interactive", card,
-                            reply_in_thread=self._should_use_reply_in_thread(msg.metadata),
-                        ),
-                    )
-                else:
-                    await loop.run_in_executor(
-                        None, self._send_message_sync, receive_id_type, msg.chat_id, "interactive", card
-                    )
+                # No active streaming card — rotate hints into a single card
+                # that gets recalled once the final answer lands.
+                await self._update_hint_card(msg.chat_id, msg.metadata, hint)
                 return
 
             if (
@@ -2606,6 +2592,9 @@ class FeishuChannel(BaseChannel):
                             "interactive",
                             json.dumps(card, ensure_ascii=False),
                         )
+
+            if progress_event is None:
+                await self._cleanup_hints(msg.chat_id, msg.metadata)
 
         except Exception:
             self.logger.exception("Error sending message")
@@ -2894,3 +2883,80 @@ class FeishuChannel(BaseChannel):
         return "\n".join(
             f"{self.config.tool_hint_prefix} {ln}" for ln in lines if ln.strip()
         )
+
+    def _create_hint_card_sync(self, receive_id_type: str, chat_id: str, content: str) -> str | None:
+        """Create a regular interactive card for rotating tool hints; return message_id."""
+        card = json.dumps(
+            {"config": {"wide_screen_mode": True}, "elements": [
+                {"tag": "markdown", "content": content},
+            ]},
+            ensure_ascii=False,
+        )
+        return self._send_message_sync(receive_id_type, chat_id, "interactive", card)
+
+    def _recall_message_sync(self, message_id: str) -> None:
+        """Best-effort recall (delete) of a message."""
+        from lark_oapi.api.im.v1 import DeleteMessageRequest
+
+        try:
+            request = DeleteMessageRequest.builder().message_id(message_id).build()
+            self._client.im.v1.message.delete(request)
+        except Exception as e:
+            self.logger.debug("Recall failed for {}: {}", message_id, e)
+
+    async def _update_hint_card(
+        self, chat_id: str, metadata: dict[str, Any], hint: str,
+    ) -> None:
+        """Rotate tool hints into a single card; recalled when the final answer lands."""
+        loop = asyncio.get_running_loop()
+        rid_type = "chat_id" if chat_id.startswith("oc_") else "open_id"
+        key = self._stream_key(chat_id, metadata)
+        buf = self._hint_bufs.get(key)
+        lines = list(buf["lines"]) if buf else []
+        for ln in (hint or "").splitlines():
+            ln = ln.strip()
+            if ln:
+                lines.append(ln)
+        if len(lines) > _HINT_MAX_LINES:
+            dropped = len(lines) - _HINT_MAX_LINES
+            lines = lines[-_HINT_MAX_LINES:]
+            lines.insert(0, f"… 省略 {dropped} 条工具调用 …")
+        content = "🛠 执行中\n" + "\n".join(f"🔧 {ln}" for ln in lines)
+        try:
+            if buf is None or not buf.get("message_id"):
+                mid = await loop.run_in_executor(
+                    None, self._create_hint_card_sync, rid_type, chat_id, content,
+                )
+                if mid:
+                    self._hint_bufs[key] = {"message_id": mid, "lines": lines}
+            else:
+                # Feishu can't patch arbitrary interactive cards, so replace by
+                # recall + resend (fast enough for tool hints).
+                await loop.run_in_executor(
+                    None, self._recall_message_sync, buf["message_id"],
+                )
+                mid = await loop.run_in_executor(
+                    None, self._create_hint_card_sync, rid_type, chat_id, content,
+                )
+                if mid:
+                    buf["message_id"] = mid
+                    buf["lines"] = lines
+                else:
+                    self._hint_bufs.pop(key, None)
+        except Exception as e:
+            self.logger.warning("Tool hint card update failed: {}", e)
+            self._hint_bufs.pop(key, None)
+
+    async def _cleanup_hints(
+        self, chat_id: str, metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """Delete the rotating tool-hint card once the final answer is out."""
+        key = self._stream_key(chat_id, metadata or {})
+        buf = self._hint_bufs.pop(key, None)
+        if not buf or not buf.get("message_id"):
+            return
+        loop = asyncio.get_running_loop()
+        try:
+            await loop.run_in_executor(None, self._recall_message_sync, buf["message_id"])
+        except Exception:
+            pass  # Keep the card if recall fails

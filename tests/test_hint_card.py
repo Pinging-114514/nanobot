@@ -1,0 +1,169 @@
+"""Behavior test for the rotating tool-hint card (TG) — no network needed.
+
+Verifies:
+1. Multiple tool hints collapse into ONE message (edit in place), no spam.
+2. The hint card is deleted once the final answer lands.
+"""
+
+import asyncio
+import sys
+import types
+from unittest.mock import MagicMock
+
+# --- Fake `telegram` module so runtime.py imports offline ---
+telegram_mod = types.ModuleType("telegram")
+telegram_mod.BotCommand = lambda *a, **k: None
+telegram_mod.BotCommandScopeAllPrivateChats = object
+telegram_mod.InlineKeyboardButton = lambda *a, **k: None
+telegram_mod.InlineKeyboardMarkup = lambda *a, **k: None
+
+
+telegram_mod.MessageEntity = object
+telegram_mod.ReactionTypeEmoji = object
+telegram_mod.Update = object
+telegram_mod.User = object
+
+
+telegram_mod.request = types.ModuleType("telegram.request")
+telegram_mod.request.HTTPXRequest = object
+sys.modules["telegram.request"] = telegram_mod.request
+
+
+
+class _FakeMessage:
+    def __init__(self, message_id):
+        self.message_id = message_id
+
+
+class _FakeBadRequest(Exception):
+    pass
+
+
+telegram_mod.Message = _FakeMessage
+telegram_mod.ReplyParameters = object
+
+
+class _FakeRetryAfter(Exception):
+    @property
+    def retry_after(self):
+        return 0.1
+
+
+telegram_mod.BadRequest = _FakeBadRequest
+telegram_mod.NetworkError = Exception
+telegram_mod.RetryAfter = _FakeRetryAfter
+telegram_mod.TimedOut = Exception
+
+telegram_mod.constants = types.ModuleType("telegram.constants")
+telegram_mod.constants.ChatAction = type("ChatAction", (), {})
+
+telegram_mod.error = telegram_mod  # re-export names from telegram.error
+
+telegram_mod.ext = types.ModuleType("telegram.ext")
+telegram_mod.ext.Application = type("Application", (), {"__class_getitem__": classmethod(lambda cls, *a, **k: cls)})
+telegram_mod.ext.ApplicationBuilder = object
+telegram_mod.ext.CallbackQueryHandler = object
+telegram_mod.ext.MessageHandler = object
+telegram_mod.ext.ContextTypes = object
+telegram_mod.ext.filters = types.ModuleType("telegram.ext.filters")
+telegram_mod.ext.filters.ALL = object
+sys.modules["telegram"] = telegram_mod
+sys.modules["telegram.constants"] = telegram_mod.constants
+sys.modules["telegram.error"] = telegram_mod.error
+sys.modules["telegram.ext"] = telegram_mod.ext
+sys.modules["telegram.ext.filters"] = telegram_mod.ext.filters
+
+sys.path.insert(0, ".")
+
+from nanobot.channels.telegram.runtime import TelegramChannel  # noqa: E402
+from nanobot.bus.progress import ProgressEvent  # noqa: E402
+from nanobot.bus.outbound_events import OutboundMessage  # noqa: E402
+
+CALLS = []
+
+
+class FakeApp:
+    def __init__(self):
+        self.bot = self
+
+    async def send_message(self, chat_id=None, text=None, **kw):
+        CALLS.append(("send", text))
+        return _FakeMessage(12345)
+
+    async def edit_message_text(self, chat_id=None, message_id=None, text=None, **kw):
+        CALLS.append(("edit", message_id, text))
+
+    async def delete_message(self, chat_id=None, message_id=None, **kw):
+        CALLS.append(("delete", message_id))
+
+
+def make_channel():
+    ch = TelegramChannel.__new__(TelegramChannel)  # skip __init__ network deps
+    ch.config = MagicMock()
+    ch.config.reply_to_message = False
+    ch.config.rich_messages = False
+    ch._app = FakeApp()
+    ch._stream_bufs = {}
+    ch._hint_bufs = {}
+    ch._typing_tasks = {}
+    ch._message_threads = {}
+    ch.logger = MagicMock()
+    return ch
+
+
+def hint_msg(content: str) -> OutboundMessage:
+    return OutboundMessage(
+        channel="telegram",
+        chat_id="12345",
+        event=ProgressEvent(content=content, tool_hint=True),
+        metadata={},
+        content=content,
+    )
+
+
+def final_msg(content: str) -> OutboundMessage:
+    return OutboundMessage(
+        channel="telegram",
+        chat_id="12345",
+        event=None,
+        metadata={},
+        content=content,
+    )
+
+
+async def main():
+    ch = make_channel()
+    # 3 tool hints arrive
+    await ch.send(hint_msg('read_file("a.py")'))
+    await ch.send(hint_msg('grep("TODO", "src/")'))
+    await ch.send(hint_msg('exec("ls -la")'))
+
+    sends = [c for c in CALLS if c[0] == "send"]
+    edits = [c for c in CALLS if c[0] == "edit"]
+    assert len(sends) == 1, f"expected 1 hint message, got {len(sends)}: {sends}"
+    assert len(edits) == 2, f"expected 2 hint edits, got {len(edits)}"
+    assert all(e[1] == 12345 for e in edits), "edits must target the same message"
+    assert "read_file" in sends[0][1] and "exec" in edits[-1][2]
+
+    # Final answer lands → hint card must be deleted
+    await ch.send(final_msg("这里是最终回答"))
+    deletes = [c for c in CALLS if c[0] == "delete"]
+    assert len(deletes) == 1 and deletes[0][1] == 12345, f"expected hint card delete, got {deletes}"
+    assert ch._hint_bufs.get(12345) is None
+
+    # Line cap: 20 hints → card keeps at most _HINT_MAX_LINES + 1 (omission line)
+    CALLS.clear()
+    ch2 = make_channel()
+    for i in range(20):
+        await ch2.send(hint_msg(f'tool_{i}("x")'))
+    sends2 = [c for c in CALLS if c[0] == "send"]
+    edits2 = [c for c in CALLS if c[0] == "edit"]
+    assert len(sends2) == 1 and len(edits2) == 19
+    last_text = (edits2[-1][2] if edits2 else sends2[0][1])
+    assert "省略" in last_text, "cap overflow should show an omission line"
+
+    print("ALL HINT-CARD TESTS PASSED")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
