@@ -2487,7 +2487,10 @@ class FeishuChannel(BaseChannel):
                     return
                 # No active streaming card — rotate hints into a single card
                 # that gets recalled once the final answer lands.
-                await self._update_hint_card(msg.chat_id, msg.metadata, hint)
+                await self._update_hint_card(
+                    msg.chat_id, msg.metadata, hint,
+                    replace=bool(msg.metadata.get("_hint_replace")),
+                )
                 return
 
             if (
@@ -2921,13 +2924,18 @@ class FeishuChannel(BaseChannel):
 
     async def _update_hint_card(
         self, chat_id: str, metadata: dict[str, Any], hint: str,
+        *,
+        replace: bool = False,
     ) -> None:
-        """Rotate tool hints into a single card; recalled when the final answer lands."""
+        """Rotate tool hints into a single card; recalled when the final answer lands.
+
+        ``replace=True`` clears previous lines first (used by subagent
+        progress so each round replaces the last instead of appending)."""
         loop = asyncio.get_running_loop()
         rid_type = "chat_id" if chat_id.startswith("oc_") else "open_id"
         key = self._stream_key(chat_id, metadata)
         buf = self._hint_bufs.get(key)
-        lines = list(buf["lines"]) if buf else []
+        lines = [] if replace else (list(buf["lines"]) if buf else [])
         for ln in (hint or "").splitlines():
             ln = ln.strip()
             if ln:

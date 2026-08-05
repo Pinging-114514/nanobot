@@ -863,6 +863,7 @@ class TelegramChannel(BaseChannel):
             if progress_event and progress_event.tool_hint:
                 await self._update_hint_buffer(
                     chat_id, msg.content, reply_params, thread_kwargs,
+                    replace=bool(msg.metadata.get("_hint_replace")),
                 )
                 return
 
@@ -974,11 +975,16 @@ class TelegramChannel(BaseChannel):
         hint: str,
         reply_params: ReplyParameters | None,
         thread_kwargs: dict[str, int],
+        *,
+        replace: bool = False,
     ) -> None:
-        """Rotate tool hints into a single per-chat card (edit in place)."""
+        """Rotate tool hints into a single per-chat card (edit in place).
+
+        ``replace=True`` clears previous lines first (used by subagent
+        progress so each round replaces the last instead of appending)."""
         app = self._require_app()
         buf = self._hint_bufs.get(chat_id)
-        lines = list(buf["lines"]) if buf else []
+        lines = [] if replace else (list(buf["lines"]) if buf else [])
         for ln in (hint or "").splitlines():
             ln = ln.strip()
             if ln:

@@ -193,6 +193,36 @@ async def main():
     assert len(r_deletes) == 2, f"expected 2 card deletes (hint+reasoning), got {r_deletes}"
     assert ch3._hint_bufs.get(12345) is None and ch3._reasoning_bufs.get(12345) is None
 
+    # Subagent progress uses _hint_replace: each round REPLACES the card
+    # (no accumulating '第 N 轮' lines), final delete still happens.
+    CALLS.clear()
+    ch4 = make_channel()
+
+    def sub_progress(round_no: int) -> OutboundMessage:
+        return OutboundMessage(
+            channel="telegram", chat_id="12345",
+            event=ProgressEvent(
+                content=f"🤖 子代理 [x] 执行中 (第 {round_no} 轮)", tool_hint=True,
+            ),
+            metadata={"_hint_replace": True},
+            content=f"🤖 子代理 [x] 执行中 (第 {round_no} 轮)",
+        )
+
+    await ch4.send(sub_progress(1))
+    await ch4.send(sub_progress(1))  # duplicate round 1 (multi-phase checkpoint)
+    await ch4.send(sub_progress(2))
+    await ch4.send(sub_progress(2))  # duplicate round 2
+    sends4 = [c for c in CALLS if c[0] == "send"]
+    edits4 = [c for c in CALLS if c[0] == "edit"]
+    # replace resets lines, so every message is a fresh send or edit with ONE line
+    assert len(sends4) == 1, f"expected 1 send, got {len(sends4)}"
+    assert "(第 1 轮)" in sends4[0][1] and "(第 2 轮)" not in sends4[0][1]
+    assert len(edits4) == 3, f"expected 3 replace edits, got {len(edits4)}"
+    last4 = edits4[-1][2]
+    assert "(第 2 轮)" in last4 and "(第 1 轮)" not in last4, f"replace must not accumulate: {last4}"
+    await ch4.send(final_msg("回答"))
+    assert any(c[0] == "delete" for c in CALLS), "hint card must be deleted after final answer"
+
     print("ALL HINT-CARD TESTS PASSED")
 
 

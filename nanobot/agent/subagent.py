@@ -156,6 +156,7 @@ class SubagentManager:
         self._llm_wall_timeout_for_session = llm_wall_timeout_for_session
         self._running_tasks: dict[str, asyncio.Task[str]] = {}
         self._task_statuses: dict[str, SubagentStatus] = {}
+        self._last_subagent_progress: dict[str, int | None] = {}  # channel:chat:label -> last published round
         self._session_tasks: dict[str, set[str]] = {}  # session_key -> {task_id, ...}
 
     def set_provider(self, provider: LLMProvider, model: str) -> None:
@@ -370,9 +371,12 @@ class SubagentManager:
             status.iteration = payload.get("iteration", status.iteration)
             # Surface subagent activity on the origin channel's rotating hint
             # card (tool_hint events) so the user sees it is still working.
-            await self._publish_subagent_progress(
-                origin, label, status.iteration, origin_message_id,
-            )
+            # Only publish once per round (awaiting_tools) to avoid duplicate
+            # '第 N 轮' lines from the multi-phase checkpoints of one round.
+            if payload.get("phase") in ("awaiting_tools", "tools_completed"):
+                await self._publish_subagent_progress(
+                    origin, label, status.iteration, origin_message_id,
+                )
 
         try:
             root = workspace_scope.project_path if workspace_scope is not None else self.workspace
@@ -484,7 +488,11 @@ class SubagentManager:
         ok: bool = True,
     ) -> None:
         """Publish subagent progress as a tool_hint so the origin channel's
-        rotating hint card shows it's still working."""
+        rotating hint card shows it's still working.
+
+        Uses ``_hint_replace`` metadata so the channel *replaces* any previous
+        subagent line for this task instead of appending, and dedups identical
+        content (the same round is checkpointed multiple times)."""
         if self.bus is None:
             return
         if done:
@@ -494,7 +502,13 @@ class SubagentManager:
             content = f"🤖 子代理 [{label}] 执行中"
             if iteration:
                 content += f" (第 {iteration} 轮)"
-        metadata: dict[str, Any] = {}
+            # Same round is checkpointed multiple times (awaiting_tools,
+            # tools_completed, ...); publish once per round per chat.
+            key = f"{origin['channel']}:{origin['chat_id']}:{label}"
+            if self._last_subagent_progress.get(key) == iteration:
+                return
+            self._last_subagent_progress[key] = iteration
+        metadata: dict[str, Any] = {"_hint_replace": True}
         if origin_message_id:
             metadata["message_id"] = origin_message_id
         await self.bus.publish_outbound(
