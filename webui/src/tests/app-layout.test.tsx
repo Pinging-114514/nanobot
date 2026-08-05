@@ -1,4 +1,5 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import i18n from "@/i18n";
@@ -62,8 +63,6 @@ function baseSettingsPayload() {
       temperature: 0.1,
       reasoning_effort: null,
       timezone: "UTC",
-      bot_name: "nanobot",
-      bot_icon: "nb",
       tool_hint_max_length: 40,
     },
     model_presets: [{
@@ -1717,6 +1716,7 @@ describe("App layout", () => {
   });
 
   it("opens the settings view from the sidebar footer", async () => {
+    const user = userEvent.setup();
     mockSessions = [
       {
         key: "websocket:chat-a",
@@ -1731,6 +1731,18 @@ describe("App layout", () => {
       "fetch",
       vi.fn(async (input: RequestInfo | URL) => {
         const href = String(input);
+        if (href === "/api/settings/api-service") {
+          return jsonResponse({
+            installed: false,
+            running: false,
+            managed: false,
+            host: "127.0.0.1",
+            port: 8900,
+            timeout: 120,
+            endpoint: "http://127.0.0.1:8900/v1",
+            command: "nanobot serve",
+          });
+        }
         if (href === "/api/settings/provider-models?provider=openai") {
           return jsonResponse({
             provider: "openai",
@@ -1761,8 +1773,6 @@ describe("App layout", () => {
                 temperature: 0.1,
                 reasoning_effort: null,
                 timezone: "UTC",
-                bot_name: "nanobot",
-                bot_icon: "nb",
                 tool_hint_max_length: 40,
               },
               model_presets: [
@@ -2000,8 +2010,8 @@ describe("App layout", () => {
         .getAllByRole("button", { name: /OpenAI/ })
         .some((button) => button.getAttribute("aria-haspopup") === "menu"),
     ).toBe(true);
-    fireEvent.pointerDown(screen.getByRole("button", { name: "Select model" }));
-    fireEvent.click(await screen.findByText("openai/gpt-4o-mini"));
+    await user.click(screen.getByRole("button", { name: "Select model" }));
+    await user.click(await screen.findByRole("option", { name: /openai\/gpt-4o-mini/ }));
     expect(screen.getByRole("button", { name: "Save preset" })).toBeEnabled();
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
     expect(screen.queryByText("Up to date.")).not.toBeInTheDocument();
@@ -2011,13 +2021,12 @@ describe("App layout", () => {
     fireEvent.pointerDown(screen.getByRole("button", { name: /Auto/ }));
     expect(screen.getAllByTestId("provider-picker-logo-openai").length).toBeGreaterThan(0);
     fireEvent.click(screen.getByRole("menuitem", { name: /Auto/ }));
-    const openModelPicker = () => {
+    const openModelPicker = async () => {
       const modelButtons = screen.getAllByRole("button", { name: /openai\/gpt-4o/ });
-      fireEvent.pointerDown(modelButtons[modelButtons.length - 1]);
+      await user.click(modelButtons[modelButtons.length - 1]);
     };
-    openModelPicker();
-    await screen.findByText("openai/gpt-4o-mini");
-    fireEvent.click(screen.getAllByText("openai/gpt-4o-mini")[0]);
+    await openModelPicker();
+    await user.click(await screen.findByRole("option", { name: /openai\/gpt-4o-mini/ }));
     expect(screen.queryByText("Unsaved changes.")).not.toBeInTheDocument();
     expect(screen.getByText("Model providers")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Add your own model provider" })).toBeInTheDocument();
@@ -2089,19 +2098,23 @@ describe("App layout", () => {
     expect(screen.queryByDisplayValue("unsaved-brave-key")).not.toBeInTheDocument();
 
     fireEvent.click(within(settingsNav).getByRole("button", { name: "System" }));
-    expect(screen.getByText("Bot name")).toBeInTheDocument();
+    expect(screen.getByText("Regional")).toBeInTheDocument();
+    expect(screen.getByText("Timezone")).toBeInTheDocument();
+    expect(screen.queryByText("Bot name")).not.toBeInTheDocument();
+    expect(screen.queryByText("Bot icon")).not.toBeInTheDocument();
     expect(screen.queryByText("Tool hint length")).not.toBeInTheDocument();
     expect(screen.queryByText("Heartbeat")).not.toBeInTheDocument();
     expect(screen.queryByText("Dream")).not.toBeInTheDocument();
     expect(screen.queryByText("Unified session")).not.toBeInTheDocument();
     expect(screen.getByText("Default workspace")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
-    fireEvent.pointerDown(screen.getByRole("button", { name: "UTC" }));
-    expect(screen.getByPlaceholderText("Search timezone")).toBeInTheDocument();
-    fireEvent.change(screen.getByPlaceholderText("Search timezone"), {
+    fireEvent.click(screen.getByRole("button", { name: "UTC" }));
+    const timezoneSearch = await screen.findByPlaceholderText("Search timezone");
+    expect(timezoneSearch).toBeInTheDocument();
+    fireEvent.change(timezoneSearch, {
       target: { value: "Shanghai" },
     });
-    fireEvent.click(screen.getByRole("menuitem", { name: /Asia\/Shanghai/ }));
+    await user.click(screen.getByRole("option", { name: /Asia\/Shanghai/ }));
     expect(screen.getByRole("button", { name: "Asia/Shanghai" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Save" })).toBeEnabled();
   });
@@ -2281,8 +2294,6 @@ describe("App layout", () => {
                 temperature: 0.1,
                 reasoning_effort: null,
                 timezone: "UTC",
-                bot_name: "nanobot",
-                bot_icon: "nb",
                 tool_hint_max_length: 40,
               },
               model_presets: [

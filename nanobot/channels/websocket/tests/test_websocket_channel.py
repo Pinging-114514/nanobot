@@ -12,7 +12,10 @@ import websockets
 from websockets.exceptions import ConnectionClosed
 from websockets.frames import Close
 
-from nanobot.bus.events import OUTBOUND_META_AGENT_UI, OutboundMessage
+from nanobot.bus.events import (
+    OUTBOUND_META_AGENT_UI,
+    OutboundMessage,
+)
 from nanobot.bus.outbound_events import (
     GoalStateSyncEvent,
     GoalStatusEvent,
@@ -2583,6 +2586,8 @@ async def test_settings_api_returns_safe_subset_and_updates_whitelist(
         assert body["agent"]["model_preset"] == "default"
         assert body["agent"]["max_tokens"] == 8192
         assert body["agent"]["timezone"] == "UTC"
+        assert "bot_name" not in body["agent"]
+        assert "bot_icon" not in body["agent"]
         assert body["agent"]["tool_hint_max_length"] == 40
         presets = {preset["name"]: preset for preset in body["model_presets"]}
         assert presets["default"]["active"] is True
@@ -2874,8 +2879,8 @@ async def test_settings_api_returns_safe_subset_and_updates_whitelist(
         assert saved.model_presets["fast-writing"].model == "openai/gpt-5.5"
         assert saved.model_presets["fast-writing"].provider == "openai"
         assert saved.agents.defaults.timezone == "Asia/Shanghai"
-        assert saved.agents.defaults.bot_name == "Nano"
-        assert saved.agents.defaults.bot_icon == "N"
+        assert saved.agents.defaults.bot_name == "nanobot"
+        assert saved.agents.defaults.bot_icon == "🐈"
         assert saved.agents.defaults.tool_hint_max_length == 120
         assert saved.providers.openrouter.api_key == "sk-or-next"
         assert saved.providers.openrouter.api_base == "https://openrouter.ai/api/v1"

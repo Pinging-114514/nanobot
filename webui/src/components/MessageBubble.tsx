@@ -4,6 +4,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type ComponentPropsWithoutRef,
   type ReactNode,
 } from "react";
 import {
@@ -77,6 +78,42 @@ function ForkArrowIcon({ className }: { className?: string }) {
       <path d="m21 3-7.536 7.536A5 5 0 0 0 12 14.07V21" />
       <path d="m3 3 7.536 7.536A5 5 0 0 1 12 14.07V15" />
     </svg>
+  );
+}
+
+type MessageTimestampProps = Omit<
+  ComponentPropsWithoutRef<"time">,
+  "dateTime" | "title"
+> & {
+  timestamp: number;
+  tooltipLabel: string;
+};
+
+function MessageTimestamp({
+  timestamp,
+  tooltipLabel,
+  className,
+  children,
+  ...props
+}: MessageTimestampProps) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <time
+          {...props}
+          dateTime={new Date(timestamp).toISOString()}
+          tabIndex={0}
+          className={cn(
+            "cursor-help text-[11px] leading-none text-muted-foreground/70 tabular-nums",
+            "focus-visible:rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+            className,
+          )}
+        >
+          {children}
+        </time>
+      </TooltipTrigger>
+      <TooltipContent side="top" align="center">{tooltipLabel}</TooltipContent>
+    </Tooltip>
   );
 }
 
@@ -253,6 +290,9 @@ export function MessageBubble({
     const hasText = userContent.trim().length > 0;
     const showDeliveryStatus =
       message.deliveryStatus === "sending" || message.deliveryStatus === "failed";
+    const createdAtLabel = formatMessageEndTime(message.createdAt);
+    const showCreatedAt = createdAtLabel.length > 0;
+    const createdAtTitle = showCreatedAt ? fmtDateTime(message.createdAt) : "";
     const quotedContext = parsedMessage.quotedContext;
     const slashCommand = matchingSlashCommand(userContent, slashCommands);
     const messageText = slashCommand ? (
@@ -262,6 +302,7 @@ export function MessageBubble({
           text={userContent.slice(slashCommand.command.length)}
           cliApps={mentionCliApps}
           mcpPresets={mentionMcpPresets}
+          sessionMentions={message.sessionMentions}
         />
       </>
     ) : (
@@ -269,6 +310,7 @@ export function MessageBubble({
         text={userContent}
         cliApps={mentionCliApps}
         mcpPresets={mentionMcpPresets}
+        sessionMentions={message.sessionMentions}
       />
     );
     return (
@@ -298,9 +340,18 @@ export function MessageBubble({
             {messageText}
           </p>
         ) : null}
-        {showDeliveryStatus || (hasText && showCopyAction) ? (
+        {showDeliveryStatus || showCreatedAt || (hasText && showCopyAction) ? (
           <TooltipProvider delayDuration={220} skipDelayDuration={80}>
             <div className="flex min-h-8 items-center justify-end gap-1.5 text-muted-foreground">
+              {showCreatedAt ? (
+                <MessageTimestamp
+                  data-message-created-at
+                  timestamp={message.createdAt}
+                  tooltipLabel={createdAtTitle}
+                >
+                  {createdAtLabel}
+                </MessageTimestamp>
+              ) : null}
               <UserDeliveryStatus
                 status={message.deliveryStatus}
                 errorKind={message.deliveryErrorKind}
@@ -338,11 +389,23 @@ export function MessageBubble({
     message.role === "assistant" && !message.isStreaming
       ? formatMessageEndTime(completedAt)
       : "";
+  const assistantTimestamp =
+    typeof completedAt === "number" && Number.isFinite(completedAt)
+      ? completedAt
+      : message.createdAt;
+  const assistantTimestampLabel =
+    message.role === "assistant" && !message.isStreaming
+      ? formatMessageEndTime(assistantTimestamp)
+      : "";
   const showCompletedAt =
     completedAtLabel.length > 0
     && (!empty || hasReasoning || media.length > 0);
-  const completedAtTitle = showCompletedAt ? fmtDateTime(completedAt) : "";
-  const showAssistantFooterRow = showCopyButton || showForkButton || showCompletedAt;
+  const showAssistantTimestamp =
+    assistantTimestampLabel.length > 0
+    && (!empty || hasReasoning || media.length > 0);
+  const assistantTimestampTitle = showAssistantTimestamp ? fmtDateTime(assistantTimestamp) : "";
+  const showAutomationTrigger = showAssistantTimestamp && automationSourceLabel.length > 0;
+  const showAssistantFooterRow = showCopyButton || showForkButton || showAssistantTimestamp;
   const showAssistantFooterSlot =
     message.role === "assistant"
     && (!empty || hasReasoning || media.length > 0);
@@ -359,12 +422,6 @@ export function MessageBubble({
         <ThinkingState />
       ) : empty && message.isStreaming ? null : (
         <>
-          {automationSourceLabel ? (
-            <AutomationSourceBadge
-              label={automationSourceLabel}
-              triggerLabel={automationTriggeredLabel}
-            />
-          ) : null}
           <div data-assistant-selectable={message.isStreaming ? undefined : "true"}>
             {/* A mode switch rebuilds Streamdown's subtree and moves the scroll anchor. */}
             <MarkdownText
@@ -414,15 +471,21 @@ export function MessageBubble({
                 <TooltipContent side="top" align="center">{forkLabel}</TooltipContent>
               </Tooltip>
             ) : null}
-            {showCompletedAt ? (
-              <time
-                data-assistant-completed-at
-                dateTime={new Date(completedAt!).toISOString()}
-                className="text-[11px] leading-none text-muted-foreground/70 tabular-nums"
-                title={completedAtTitle}
+            {showAssistantTimestamp ? (
+              <MessageTimestamp
+                {...(showCompletedAt ? { "data-assistant-completed-at": true } : {})}
+                data-message-timestamp
+                timestamp={assistantTimestamp}
+                tooltipLabel={assistantTimestampTitle}
               >
-                {completedAtLabel}
-              </time>
+                {assistantTimestampLabel}
+              </MessageTimestamp>
+            ) : null}
+            {showAutomationTrigger ? (
+              <AutomationTriggerMeta
+                label={automationTriggeredLabel}
+                sourceLabel={automationSourceLabel}
+              />
             ) : null}
           </div>
         </TooltipProvider>
@@ -449,22 +512,23 @@ function UserQuotedContext({ text, label }: { text: string; label: string }) {
   );
 }
 
-function AutomationSourceBadge({ label, triggerLabel }: { label: string; triggerLabel: string }) {
+function AutomationTriggerMeta({ label, sourceLabel }: { label: string; sourceLabel: string }) {
   return (
-    <div
-      className={cn(
-        "mb-2 inline-flex max-w-full items-center gap-1.5 rounded-full px-2 py-1",
-        "border border-sky-500/15 bg-sky-500/[0.06]",
-        "text-[11px] font-medium leading-none text-sky-700",
-        "dark:border-sky-300/15 dark:bg-sky-300/[0.08] dark:text-sky-200/80",
-      )}
-      title={triggerLabel}
-    >
-      <Clock3 className="h-3 w-3 shrink-0" aria-hidden />
-      <span className="min-w-0 truncate">{label}</span>
-      <span className="text-current/45" aria-hidden>·</span>
-      <span className="shrink-0">{triggerLabel}</span>
-    </div>
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span
+          data-automation-trigger
+          tabIndex={0}
+          className={cn(
+            "shrink-0 cursor-help text-[11px] leading-none text-muted-foreground/70 tabular-nums",
+            "focus-visible:rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+          )}
+        >
+          {label}
+        </span>
+      </TooltipTrigger>
+      <TooltipContent side="top" align="center">{sourceLabel}</TooltipContent>
+    </Tooltip>
   );
 }
 

@@ -309,8 +309,6 @@ function modelSettings(model: string, provider: string): SettingsPayload {
       temperature: 0.7,
       reasoning_effort: null,
       timezone: "UTC",
-      bot_name: "nanobot",
-      bot_icon: "",
       tool_hint_max_length: 40,
     },
     model_presets: [{
@@ -870,7 +868,7 @@ describe("ThreadShell", () => {
       expectSendMessageWithTurn(client, "skill-reference", "Use $github for this"),
     );
     expect(screen.getByTestId("message-skill-reference-github"))
-      .toHaveTextContent("$github");
+      .toHaveTextContent(/^github$/);
   });
 
   it("clears the old thread when the active session is removed", async () => {
@@ -3613,7 +3611,7 @@ describe("ThreadShell", () => {
     ));
 
     const input = await screen.findByLabelText("Message input");
-    expect(screen.queryByRole("listbox", { name: "Apps" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("listbox", { name: "Mentions" })).not.toBeInTheDocument();
 
     const payload: CliAppsPayload = {
       apps: [{
@@ -3641,7 +3639,7 @@ describe("ThreadShell", () => {
     });
     fireEvent.change(input, { target: { value: "@", selectionStart: 1 } });
 
-    expect(screen.getByRole("listbox", { name: "Apps" })).toBeInTheDocument();
+    expect(screen.getByRole("listbox", { name: "Mentions" })).toBeInTheDocument();
     expect(screen.getByRole("option", { name: /@gimp/i })).toBeInTheDocument();
   });
 
@@ -3768,5 +3766,43 @@ describe("ThreadShell", () => {
     expect(screen.getByTestId("composer-cli-mention-obsidian-agent-cli")).toHaveTextContent(
       "@obsidian-agent-cli",
     );
+  });
+
+  it("offers only same-project sessions in restricted mode", async () => {
+    const client = makeClient();
+    const currentScope = {
+      project_path: "/projects/current",
+      access_mode: "restricted" as const,
+    };
+    const sameProject = {
+      ...session("same-project"),
+      title: "Same project",
+      workspaceScope: currentScope,
+    };
+    const otherProject = {
+      ...session("other-project"),
+      title: "Other project",
+      workspaceScope: {
+        project_path: "/projects/other",
+        access_mode: "restricted" as const,
+      },
+    };
+
+    render(wrap(
+      client,
+      <ThreadShell
+        session={session("current")}
+        sessions={[sameProject, otherProject]}
+        title="Current"
+        onToggleSidebar={() => {}}
+        workspaceScope={currentScope}
+      />,
+    ));
+
+    const input = await screen.findByLabelText("Message input");
+    fireEvent.change(input, { target: { value: "@", selectionStart: 1 } });
+
+    expect(screen.getByRole("option", { name: /Same project/i })).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: /Other project/i })).not.toBeInTheDocument();
   });
 });

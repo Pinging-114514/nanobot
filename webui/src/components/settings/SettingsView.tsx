@@ -85,6 +85,10 @@ import {
 } from "@/components/settings/channels/ChannelSetupPanel";
 import { Button } from "@/components/ui/button";
 import {
+  ComboboxOption,
+  useComboboxNavigation,
+} from "@/components/ui/combobox";
+import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
@@ -100,6 +104,11 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 import { Textarea } from "@/components/ui/textarea";
 import { isLoopbackHost } from "@/lib/network";
 import {
@@ -234,8 +243,6 @@ interface AgentSettingsDraft {
   temperature: number;
   reasoningEffort: string;
   timezone: string;
-  botName: string;
-  botIcon: string;
   toolHintMaxLength: number;
 }
 
@@ -475,8 +482,6 @@ const DEFAULT_AGENT_SETTINGS_DRAFT: AgentSettingsDraft = {
   temperature: 0.1,
   reasoningEffort: "",
   timezone: "UTC",
-  botName: "nanobot",
-  botIcon: "",
   toolHintMaxLength: 40,
 };
 
@@ -544,8 +549,6 @@ function agentDraftFromPayload(
     temperature: activePreset?.temperature ?? payload.agent.temperature,
     reasoningEffort: activePreset?.reasoning_effort ?? "",
     timezone: payload.agent.timezone,
-    botName: payload.agent.bot_name,
-    botIcon: payload.agent.bot_icon,
     toolHintMaxLength: payload.agent.tool_hint_max_length,
   };
 }
@@ -1081,11 +1084,7 @@ export function SettingsView({
 
   const runtimeDirty = useMemo(() => {
     if (!settings) return false;
-    return (
-      form.timezone !== settings.agent.timezone ||
-      form.botName !== settings.agent.bot_name ||
-      form.botIcon !== settings.agent.bot_icon
-    );
+    return form.timezone !== settings.agent.timezone;
   }, [form, settings]);
 
   const imageGenerationDirty = useMemo(() => {
@@ -1406,8 +1405,6 @@ export function SettingsView({
     try {
       const payload = await updateSettings(token, {
         timezone: form.timezone,
-        botName: form.botName,
-        botIcon: form.botIcon,
       });
       applyPayload(payload);
       if (payload.requires_restart) {
@@ -2549,7 +2546,7 @@ function SettingsSidebar({
           <DropdownMenuContent
             align="start"
             sideOffset={6}
-            className="w-[var(--radix-dropdown-menu-trigger-width)] max-w-[calc(100vw-1.5rem)] rounded-[16px] p-1.5"
+            className="w-[var(--radix-dropdown-menu-trigger-width)] max-w-[calc(100vw-1.5rem)]"
           >
             {SETTINGS_NAV_ITEMS.map(({ key, icon: Icon, fallback }) => {
               const active = key === activeSection;
@@ -2559,7 +2556,7 @@ function SettingsSidebar({
                   aria-current={active ? "page" : undefined}
                   onSelect={() => onSelectSection(key)}
                   className={cn(
-                    "flex h-10 cursor-default items-center gap-2.5 rounded-[11px] px-2.5 text-[13px] font-medium",
+                    "flex h-10 cursor-default items-center gap-2.5 px-2.5 text-[13px] font-medium",
                     active && "bg-sidebar-accent text-foreground focus:bg-sidebar-accent",
                   )}
                 >
@@ -4760,11 +4757,11 @@ function ProvidersSettings({
               <DropdownMenuContent
                 align="end"
                 sideOffset={8}
-                className="max-h-[24rem] w-[380px] max-w-[calc(100vw-2rem)] overflow-y-auto rounded-[20px] border-border bg-popover p-1.5 shadow-none scrollbar-thin scrollbar-track-transparent"
+                className="max-h-[24rem] w-[380px] max-w-[calc(100vw-2rem)] overflow-y-auto scrollbar-thin scrollbar-track-transparent"
               >
                 <DropdownMenuItem
                   onSelect={beginCustomProviderCreation}
-                  className="flex min-h-[54px] cursor-default items-center gap-3 rounded-[14px] px-2.5 py-2 focus:bg-muted/85 focus:text-foreground"
+                  className="flex min-h-[54px] cursor-default items-center gap-3 px-2.5 py-2 focus:bg-muted/85 focus:text-foreground"
                 >
                   <ProviderIcon provider="custom" showBrandLogos={showBrandLogos} />
                   <span className="truncate text-[13px] font-medium">
@@ -4781,7 +4778,7 @@ function ProvidersSettings({
                         onToggleProvider(provider.name);
                       }
                     }}
-                    className="flex min-h-[54px] cursor-default items-center gap-3 rounded-[14px] px-2.5 py-2 focus:bg-muted/85 focus:text-foreground"
+                    className="flex min-h-[54px] cursor-default items-center gap-3 px-2.5 py-2 focus:bg-muted/85 focus:text-foreground"
                   >
                     <ProviderIcon
                       provider={provider.name}
@@ -7484,15 +7481,19 @@ function CliAppsCatalogRow({
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end">
                 <DropdownMenuItem disabled={busy} onClick={() => onAction("test", app.name)}>
-                  <PlayCircle className="mr-2 h-3.5 w-3.5" aria-hidden />
+                  <PlayCircle aria-hidden />
                   {tx("settings.cliApps.test", "Test CLI")}
                 </DropdownMenuItem>
                 <DropdownMenuItem disabled={busy} onClick={() => onAction("update", app.name)}>
-                  <RotateCcw className="mr-2 h-3.5 w-3.5" aria-hidden />
+                  <RotateCcw aria-hidden />
                   {tx("settings.cliApps.update", "Update CLI")}
                 </DropdownMenuItem>
-                <DropdownMenuItem disabled={busy} onClick={() => onAction("uninstall", app.name)}>
-                  <Trash2 className="mr-2 h-3.5 w-3.5" aria-hidden />
+                <DropdownMenuItem
+                  tone="destructive"
+                  disabled={busy}
+                  onClick={() => onAction("uninstall", app.name)}
+                >
+                  <Trash2 aria-hidden />
                   {tx("settings.cliApps.uninstall", "Uninstall CLI")}
                 </DropdownMenuItem>
               </DropdownMenuContent>
@@ -7616,17 +7617,21 @@ function McpAppsCatalogRow({
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="end">
                   <DropdownMenuItem disabled={busy} onClick={() => onAction("test", preset.name)}>
-                    <PlayCircle className="mr-2 h-3.5 w-3.5" aria-hidden />
+                    <PlayCircle aria-hidden />
                     {tx("settings.mcp.test", "Test")}
                   </DropdownMenuItem>
                   {toolNames.length ? (
                     <DropdownMenuItem disabled={busy} onClick={() => setToolsOpen((open) => !open)}>
-                      <SlidersHorizontal className="mr-2 h-3.5 w-3.5" aria-hidden />
+                      <SlidersHorizontal aria-hidden />
                       {tx("settings.mcp.toolScope", "Tools")}
                     </DropdownMenuItem>
                   ) : null}
-                  <DropdownMenuItem disabled={busy} onClick={() => onAction("remove", preset.name)}>
-                    <Trash2 className="mr-2 h-3.5 w-3.5" aria-hidden />
+                  <DropdownMenuItem
+                    tone="destructive"
+                    disabled={busy}
+                    onClick={() => onAction("remove", preset.name)}
+                  >
+                    <Trash2 aria-hidden />
                     {tx("settings.mcp.remove", "Remove")}
                   </DropdownMenuItem>
                 </DropdownMenuContent>
@@ -7690,7 +7695,7 @@ function McpAppsCatalogRow({
               onClick={() => setSetupOpen(false)}
               className="h-7 rounded-full px-2.5 text-[11.5px] font-semibold text-muted-foreground"
             >
-              {tx("actions.cancel", "Cancel")}
+              {tx("settings.actions.cancel", "Cancel")}
             </Button>
           </div>
           <div className="mt-3 grid gap-2">
@@ -8415,23 +8420,15 @@ function RuntimeSettings({
   return (
     <div className="space-y-7">
       <section>
-        <SettingsSectionTitle>{tx("settings.sections.identity", "Identity")}</SettingsSectionTitle>
-          <SettingsGroup>
-          <SettingsRow title={tx("settings.rows.botName", "Bot name")} description={tx("settings.help.botName", "Shown wherever nanobot uses a display name.")}>
-            <Input
-              value={form.botName}
-              onChange={(event) => setForm((prev) => ({ ...prev, botName: event.target.value }))}
-              className="h-8 w-[220px] rounded-full text-[13px]"
-            />
-          </SettingsRow>
-          <SettingsRow title={tx("settings.rows.botIcon", "Bot icon")} description={tx("settings.help.botIcon", "Short emoji or text shown with the bot name.")}>
-            <Input
-              value={form.botIcon}
-              onChange={(event) => setForm((prev) => ({ ...prev, botIcon: event.target.value }))}
-              className="h-8 w-[120px] rounded-full text-center text-[13px]"
-            />
-          </SettingsRow>
-          <SettingsRow title={tx("settings.rows.timezone", "Timezone")} description={tx("settings.help.timezone", "Used for schedules and time-aware replies.")}>
+        <SettingsSectionTitle>{tx("settings.sections.regional", "Regional")}</SettingsSectionTitle>
+        <SettingsGroup>
+          <SettingsRow
+            title={tx("settings.rows.timezone", "Timezone")}
+            description={tx(
+              "settings.help.timezone",
+              "Used for schedules and time-aware replies.",
+            )}
+          >
             <TimezonePicker
               value={form.timezone}
               onChange={(timezone) => setForm((prev) => ({ ...prev, timezone }))}
@@ -8841,13 +8838,35 @@ function TimezonePicker({
 }) {
   const { t } = useTranslation();
   const tx = (key: string, fallback: string) => t(key, { defaultValue: fallback });
+  const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const options = useMemo(() => timezoneOptions(value), [value]);
   const filteredOptions = useMemo(() => filterTimezoneOptions(options, query), [options, query]);
+  const optionValues = useMemo(
+    () => filteredOptions.map((option) => option.name),
+    [filteredOptions],
+  );
+  const chooseTimezone = (timezone: string) => {
+    onChange(timezone);
+    setOpen(false);
+  };
+  const navigation = useComboboxNavigation({
+    open,
+    values: optionValues,
+    selectedValue: value,
+    onSelect: chooseTimezone,
+    onClose: () => setOpen(false),
+  });
 
   return (
-    <DropdownMenu onOpenChange={(open) => !open && setQuery("")}>
-      <DropdownMenuTrigger asChild>
+    <Popover
+      open={open}
+      onOpenChange={(nextOpen) => {
+        setOpen(nextOpen);
+        if (!nextOpen) setQuery("");
+      }}
+    >
+      <PopoverTrigger asChild>
         <Button
           type="button"
           variant="outline"
@@ -8859,8 +8878,8 @@ function TimezonePicker({
           <span className="truncate">{value || tx("settings.timezone.select", "Select timezone")}</span>
           <ChevronDown className="ml-2 h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden />
         </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent
+      </PopoverTrigger>
+      <PopoverContent
         align="end"
         className="w-[340px] max-w-[calc(100vw-2rem)]"
       >
@@ -8871,27 +8890,29 @@ function TimezonePicker({
               autoFocus
               value={query}
               onChange={(event) => setQuery(event.target.value)}
-              onKeyDown={(event) => event.stopPropagation()}
+              {...navigation.inputProps}
               placeholder={tx("settings.timezone.search", "Search timezone")}
+              aria-label={tx("settings.timezone.search", "Search timezone")}
               className="h-7 border-0 bg-transparent px-0 text-[13px] shadow-none focus-visible:ring-0"
             />
           </div>
         </div>
-        <div
-          className="mt-1 max-h-[18rem] overflow-y-auto pr-0.5 scrollbar-thin scrollbar-track-transparent"
-          data-testid="timezone-picker-list"
-        >
-          {filteredOptions.length ? (
-            filteredOptions.map((option) => {
+        {filteredOptions.length ? (
+          <div
+            {...navigation.listProps}
+            aria-label={tx("settings.timezone.select", "Select timezone")}
+            className="mt-1 max-h-[18rem] overflow-y-auto pr-0.5 scrollbar-thin scrollbar-track-transparent"
+            data-testid="timezone-picker-list"
+          >
+            {filteredOptions.map((option) => {
               const selected = option.name === value;
               return (
-                <DropdownMenuItem
+                <ComboboxOption
                   key={option.name}
-                  onSelect={() => onChange(option.name)}
+                  {...navigation.getOptionProps(option.name)}
                   className={cn(
                     "flex h-9 cursor-default items-center justify-between gap-3 rounded-[12px] px-2.5 text-[13px]",
-                    "focus:bg-muted/85 focus:text-foreground",
-                    selected && "bg-muted/80 text-foreground focus:bg-muted",
+                    selected && "text-foreground",
                   )}
                 >
                   <span className="min-w-0 truncate font-medium text-foreground">{option.name}</span>
@@ -8901,17 +8922,21 @@ function TimezonePicker({
                     </span>
                     {selected ? <Check className="h-3.5 w-3.5 shrink-0" aria-hidden /> : null}
                   </span>
-                </DropdownMenuItem>
+                </ComboboxOption>
               );
-            })
-          ) : (
-            <div className="px-3 py-5 text-center text-[12px] text-muted-foreground">
-              {tx("settings.timezone.empty", "No matching timezones.")}
-            </div>
-          )}
-        </div>
-      </DropdownMenuContent>
-    </DropdownMenu>
+            })}
+          </div>
+        ) : (
+          <div
+            role="status"
+            className="px-3 py-5 text-center text-[12px] text-muted-foreground"
+            data-testid="timezone-picker-list"
+          >
+            {tx("settings.timezone.empty", "No matching timezones.")}
+          </div>
+        )}
+      </PopoverContent>
+    </Popover>
   );
 }
 
@@ -8967,8 +8992,7 @@ function ProviderPicker({
               key={provider.name}
               onSelect={() => onChange(provider.name)}
               className={cn(
-                "flex cursor-default items-center justify-between gap-2 rounded-[12px] px-2.5 py-2 text-[13px]",
-                "focus:bg-muted/85 focus:text-foreground",
+                "flex cursor-default items-center justify-between gap-2 text-[13px]",
                 selected && "bg-muted/80 text-foreground focus:bg-muted",
               )}
             >
@@ -9041,16 +9065,22 @@ function ModelIdPicker({
     !hasStaticModels &&
     hasConcreteProvider && providerConfigured && !providerUsesManualModelIds;
   const normalizedQuery = query.trim().toLowerCase();
-  const providerModels: ProviderModelsPayload["models"] = hasStaticModels
-    ? (models?.map((id) => ({ id })) ?? [])
-    : (payload?.models ?? []);
-  const visibleModels = providerModels
-    .filter((model) => {
-      if (!normalizedQuery) return true;
-      return [model.id, model.label ?? "", model.description ?? "", model.owned_by ?? ""]
-        .some((field) => field.toLowerCase().includes(normalizedQuery));
-    })
-    .slice(0, 80);
+  const providerModels: ProviderModelsPayload["models"] = useMemo(
+    () => hasStaticModels
+      ? (models?.map((id) => ({ id })) ?? [])
+      : (payload?.models ?? []),
+    [hasStaticModels, models, payload?.models],
+  );
+  const visibleModels = useMemo(
+    () => providerModels
+      .filter((model) => {
+        if (!normalizedQuery) return true;
+        return [model.id, model.label ?? "", model.description ?? "", model.owned_by ?? ""]
+          .some((field) => field.toLowerCase().includes(normalizedQuery));
+      })
+      .slice(0, 80),
+    [normalizedQuery, providerModels],
+  );
   const isCatalog = payload?.catalog_kind === "catalog";
   const defersModelList = DEFERRED_MODEL_LIST_PROVIDERS.has(effectiveProvider);
   const hasDeferredSearchQuery =
@@ -9066,6 +9096,9 @@ function ModelIdPicker({
   const customCandidate = query.trim();
   const allowCustomModel = !providerRequiresConfiguration;
   const exactQueryMatch = providerModels.some((model) => model.id === customCandidate);
+  const showCustomModel = Boolean(
+    allowCustomModel && customCandidate && !exactQueryMatch && customCandidate !== value,
+  );
   const providerModelCount = payload?.model_count ?? providerModels.length;
   const modelUnconfigured = !value.trim() || !providerConfigured;
 
@@ -9104,18 +9137,31 @@ function ModelIdPicker({
     onChange(model);
     setOpen(false);
   };
+  const navigationValues = useMemo(
+    () => [
+      ...(showModels ? visibleModels.map((model) => model.id) : []),
+      ...(showCustomModel ? [customCandidate] : []),
+    ],
+    [customCandidate, showCustomModel, showModels, visibleModels],
+  );
+  const navigation = useComboboxNavigation({
+    open,
+    values: navigationValues,
+    selectedValue: value,
+    onSelect: selectModel,
+    onClose: () => setOpen(false),
+  });
 
   const renderModelRow = (
     model: ProviderModelsPayload["models"][number],
     options: { selected?: boolean } = {},
   ) => (
-    <DropdownMenuItem
+    <ComboboxOption
       key={model.id}
-      onSelect={() => selectModel(model.id)}
+      {...navigation.getOptionProps(model.id)}
       className={cn(
         "flex cursor-default items-center justify-between gap-2 rounded-[12px] px-2 py-1.5 text-[12px]",
-        "focus:bg-muted/85 focus:text-foreground",
-        options.selected && "bg-muted/80 text-foreground focus:bg-muted",
+        options.selected && "text-foreground",
       )}
     >
       <span className="flex min-w-0 items-center gap-2">
@@ -9141,12 +9187,12 @@ function ModelIdPicker({
         {model.context_window ? <span>{formatContextWindow(model.context_window)}</span> : null}
         {options.selected ? <Check className="h-3.5 w-3.5 text-foreground" aria-hidden /> : null}
       </span>
-    </DropdownMenuItem>
+    </ComboboxOption>
   );
 
   return (
-    <DropdownMenu open={open} onOpenChange={setOpen}>
-      <DropdownMenuTrigger asChild>
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
         <Button
           type="button"
           variant="outline"
@@ -9172,8 +9218,8 @@ function ModelIdPicker({
           </span>
           <ChevronDown className="ml-2 h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden />
         </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent
+      </PopoverTrigger>
+      <PopoverContent
         align="end"
         className="w-[360px] max-w-[calc(100vw-2rem)] p-1.5"
       >
@@ -9186,13 +9232,7 @@ function ModelIdPicker({
             <Input
               value={query}
               onChange={(event) => setQuery(event.target.value)}
-              onKeyDown={(event) => {
-                event.stopPropagation();
-                if (event.key === "Enter" && allowCustomModel && customCandidate) {
-                  event.preventDefault();
-                  selectModel(customCandidate);
-                }
-              }}
+              {...navigation.inputProps}
               placeholder={
                 searchPlaceholder || tx("settings.models.searchModels", "Search or type model ID")
               }
@@ -9248,11 +9288,36 @@ function ModelIdPicker({
           </div>
         ) : null}
 
-        {showModels && visibleModels.length ? (
-          <div className="max-h-[16rem] overflow-y-auto pr-0.5 scrollbar-thin scrollbar-track-transparent">
-            {visibleModels.map((model) =>
-              renderModelRow(model, { selected: model.id === value }),
-            )}
+        {navigationValues.length ? (
+          <div
+            {...navigation.listProps}
+            aria-label={searchPlaceholder || tx("settings.models.selectModel", "Select model")}
+            className="max-h-[16rem] overflow-y-auto pr-0.5 scrollbar-thin scrollbar-track-transparent"
+          >
+            {showModels
+              ? visibleModels.map((model) =>
+                renderModelRow(model, { selected: model.id === value }),
+              )
+              : null}
+            {showCustomModel ? (
+              <>
+                {showModels && visibleModels.length ? (
+                  <div role="separator" className="-mx-1.5 my-1.5 h-px bg-border/50" />
+                ) : null}
+                <ComboboxOption
+                  {...navigation.getOptionProps(customCandidate)}
+                  className="flex cursor-default items-center gap-2 rounded-[12px] px-2 py-1.5 text-[12px]"
+                >
+                  <span className="grid h-5 w-5 shrink-0 place-items-center rounded-md bg-muted/80 text-muted-foreground">
+                    <Pencil className="h-3 w-3" aria-hidden />
+                  </span>
+                  <span className="min-w-0 truncate">
+                    {tx("settings.models.useCustomModel", "Use")}{" "}
+                    <span className="font-medium text-foreground">“{customCandidate}”</span>
+                  </span>
+                </ComboboxOption>
+              </>
+            ) : null}
           </div>
         ) : showModels ? (
           <div className="px-2 py-1.5 text-[11px] text-muted-foreground">
@@ -9260,25 +9325,8 @@ function ModelIdPicker({
           </div>
         ) : null}
 
-        {allowCustomModel && customCandidate && !exactQueryMatch && customCandidate !== value ? (
-          <>
-            {showModels ? <DropdownMenuSeparator /> : null}
-            <DropdownMenuItem
-              onSelect={() => selectModel(customCandidate)}
-              className="flex cursor-default items-center gap-2 rounded-[12px] px-2 py-1.5 text-[12px] focus:bg-muted/85"
-            >
-              <span className="grid h-5 w-5 shrink-0 place-items-center rounded-md bg-muted/80 text-muted-foreground">
-                <Pencil className="h-3 w-3" aria-hidden />
-              </span>
-              <span className="min-w-0 truncate">
-                {tx("settings.models.useCustomModel", "Use")}{" "}
-                <span className="font-medium text-foreground">“{customCandidate}”</span>
-              </span>
-            </DropdownMenuItem>
-          </>
-        ) : null}
-      </DropdownMenuContent>
-    </DropdownMenu>
+      </PopoverContent>
+    </Popover>
   );
 }
 
