@@ -1087,8 +1087,8 @@ class TelegramChannel(BaseChannel):
             if buf is None or not buf.get("message_id"):
                 sent = await self._call_with_retry(
                     app.bot.send_message,
-                    chat_id=chat_id, text="🧠 思考中\n" + text,
-                    **thread_kwargs,
+                    chat_id=chat_id, text=self._reasoning_card_text(text),
+                    parse_mode="HTML", **thread_kwargs,
                 )
                 self._reasoning_bufs[chat_id] = {
                     "message_id": sent.message_id, "text": text, "last_edit": now,
@@ -1097,7 +1097,8 @@ class TelegramChannel(BaseChannel):
                 await self._call_with_retry(
                     app.bot.edit_message_text,
                     chat_id=chat_id, message_id=buf["message_id"],
-                    text="🧠 思考中\n" + text,
+                    text=self._reasoning_card_text(text),
+                    parse_mode="HTML",
                 )
                 buf["text"] = text
                 buf["last_edit"] = now
@@ -1107,6 +1108,16 @@ class TelegramChannel(BaseChannel):
         except Exception as e:
             self.logger.warning("Reasoning card update failed: {}", e)
             self._reasoning_bufs.pop(chat_id, None)  # Recreate on next delta
+
+    def _reasoning_card_text(self, text: str) -> str:
+        """Wrap reasoning content in a Telegram blockquote so the thinking
+        chain is visually distinct from the final answer."""
+        escaped = (
+            text.replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+        )
+        return "<blockquote>🧠 思考中\n" + escaped + "</blockquote>"
 
     async def _cleanup_hints(self, chat_id: int) -> None:
         """Delete the rotating tool-hint and reasoning cards once the final answer is out."""

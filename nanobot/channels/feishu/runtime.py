@@ -3005,7 +3005,8 @@ class FeishuChannel(BaseChannel):
         if len(text) > _REASONING_MAX_CHARS:
             text = "… " + text[-_REASONING_MAX_CHARS:]
         now = time.monotonic()
-        content = "🧠 思考中\n" + text
+        # Bold heading + body so the thinking chain reads as a separate block.
+        content = "🧠 **思考中**\n" + text
         try:
             if buf is None or not buf.get("message_id"):
                 mid = await loop.run_in_executor(
