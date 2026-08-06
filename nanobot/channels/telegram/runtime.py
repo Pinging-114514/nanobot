@@ -345,6 +345,22 @@ _SEND_RETRY_BASE_DELAY = 0.5  # seconds, doubled each retry
 _STREAM_EDIT_INTERVAL_DEFAULT = 0.6  # min seconds between edit_message_text calls
 _HINT_MAX_LINES = 15  # max tool-call lines kept in the rotating hint card
 _REASONING_MAX_CHARS = 2500  # max reasoning text kept in the rotating thinking card
+_FLOOD_MAX_WAIT = 15.0  # max seconds we wait on a Telegram flood retry_after before dropping the call
+_SEND_CHUNK_INTERVAL = 0.3  # min seconds between message chunks to avoid burst flood
+
+
+class FloodWaitError(Exception):
+    """Raised when Telegram demands a flood wait longer than we allow.
+
+    Callers drop the in-flight operation (a streaming edit, a hint-card
+    update, a redundant chunk) instead of blocking the whole bot for minutes.
+    Final answers retry once through the normal path; if still flooded the
+    message is left for the user to re-ask rather than stalling the chat.
+    """
+
+    def __init__(self, retry_after: float):
+        super().__init__(f"Telegram flood wait {retry_after:.1f}s exceeds limit")
+        self.retry_after = retry_after
 
 
 @dataclass
@@ -890,6 +906,10 @@ class TelegramChannel(BaseChannel):
 
             chunks = _split_telegram_markdown(text, TELEGRAM_MAX_MESSAGE_LEN)
             for i, chunk in enumerate(chunks):
+                if i > 0:
+                    # Pace chunk sends; a long answer split into many
+                    # messages in one burst is the main flood trigger.
+                    await asyncio.sleep(_SEND_CHUNK_INTERVAL)
                 is_last = (i == len(chunks) - 1)
                 await self._send_text(
                     chat_id, chunk, reply_params, thread_kwargs,
@@ -920,14 +940,25 @@ class TelegramChannel(BaseChannel):
                 )
                 await asyncio.sleep(delay)
             except RetryAfter as e:
-                if attempt == _SEND_MAX_RETRIES:
-                    raise
                 retry_after = e.retry_after
                 delay = (
                     retry_after.total_seconds()
                     if isinstance(retry_after, timedelta)
                     else float(retry_after)
                 )
+                if delay > _FLOOD_MAX_WAIT:
+                    # Do NOT sleep for minutes on a single call: long floods
+                    # used to stall the entire send pipeline (typing on,
+                    # nothing delivered) for 200+ seconds, repeatedly.
+                    # Drop this call; streaming/hint/final paths handle it.
+                    self.logger.warning(
+                        "Flood Control: retry_after {:.1f}s exceeds limit "
+                        "{:.0f}s; dropping call",
+                        delay, _FLOOD_MAX_WAIT,
+                    )
+                    raise FloodWaitError(delay) from e
+                if attempt == _SEND_MAX_RETRIES:
+                    raise
                 self.logger.warning(
                     "Flood Control (attempt {}/{}), retrying in {:.1f}s",
                     attempt, _SEND_MAX_RETRIES, delay,
@@ -955,6 +986,9 @@ class TelegramChannel(BaseChannel):
                 reply_markup=reply_markup,
                 **(thread_kwargs or {}),
             )
+        except FloodWaitError:
+            # Long flood: drop this chunk instead of stalling the chat.
+            self.logger.warning("Flood dropped message chunk for {}", chat_id)
         except BadRequest as e:
             self.logger.warning("HTML parse failed, falling back to plain text: {}", e)
             try:
@@ -966,6 +1000,8 @@ class TelegramChannel(BaseChannel):
                     reply_markup=reply_markup,
                     **(thread_kwargs or {}),
                 )
+            except FloodWaitError:
+                self.logger.warning("Flood dropped message chunk for {}", chat_id)
             except Exception:
                 self.logger.exception("Error sending message")
                 raise
@@ -1018,6 +1054,10 @@ class TelegramChannel(BaseChannel):
                     app.bot.edit_message_text,
                     chat_id=chat_id, message_id=buf["message_id"], text=text,
                 )
+                buf["lines"] = lines
+        except FloodWaitError:
+            # Flooded: keep the card registered, skip this update.
+            if buf is not None:
                 buf["lines"] = lines
         except Exception as e:
             self.logger.warning("Tool hint card update failed: {}", e)
@@ -1117,6 +1157,12 @@ class TelegramChannel(BaseChannel):
                 buf["last_edit"] = now
             else:
                 # Throttled: accumulate without hitting the API each delta.
+                buf["text"] = text
+        except FloodWaitError:
+            # Flooded: keep the card managed, skip this edit; the final
+            # answer cleanup still deletes it.
+            buf = self._reasoning_bufs.get(chat_id)
+            if buf is not None:
                 buf["text"] = text
         except BadRequest as e:
             if self._is_not_modified_error(e):
@@ -1232,6 +1278,11 @@ class TelegramChannel(BaseChannel):
                     chat_id=int_chat_id, message_id=buf.message_id,
                     text=primary_html, parse_mode="HTML",
                 )
+            except FloodWaitError:
+                # Flooded: end the stream gracefully, keep the preview as-is.
+                self.logger.warning("Flood dropped final stream edit for {}", chat_id)
+                self._stream_bufs.pop(chat_id, None)
+                return
             except BadRequest as e:
                 # Only fall back to plain text on actual HTML parse/format errors.
                 # Network errors (TimedOut, NetworkError) should propagate immediately
@@ -1263,6 +1314,8 @@ class TelegramChannel(BaseChannel):
                         parse_mode="HTML",
                         **thread_kwargs,
                     )
+                except FloodWaitError:
+                    self.logger.warning("Flood dropped extra stream chunk for {}", chat_id)
                 except Exception:
                     # Fall back to _send_text which handles HTML→plain gracefully.
                     await self._send_text(int_chat_id, extra_html_chunk)
@@ -1294,6 +1347,10 @@ class TelegramChannel(BaseChannel):
                 )
                 buf.message_id = sent.message_id
                 buf.last_edit = now
+            except FloodWaitError:
+                # Flooded: skip the preview; the final answer path retries.
+                self.logger.warning("Flood dropped stream preview for {}", chat_id)
+                buf.last_edit = now
             except Exception as e:
                 self.logger.warning("Stream initial send failed: {}", e)
                 raise  # Let ChannelManager handle retry
@@ -1309,6 +1366,9 @@ class TelegramChannel(BaseChannel):
                     chat_id=int_chat_id, message_id=buf.message_id,
                     text=preview,
                 )
+                buf.last_edit = now
+            except FloodWaitError:
+                # Flooded: keep accumulating, skip this intermediate edit.
                 buf.last_edit = now
             except Exception as e:
                 if self._is_not_modified_error(e):
@@ -1877,7 +1937,14 @@ class TelegramChannel(BaseChannel):
         try:
             with suppress(asyncio.CancelledError):
                 while self._app:
-                    await self._app.bot.send_chat_action(chat_id=int(chat_id), action="typing")
+                    try:
+                        await self._app.bot.send_chat_action(
+                            chat_id=int(chat_id), action="typing",
+                        )
+                    except FloodWaitError:
+                        # Flooded: pause typing rather than hammering the API;
+                        # resume after the flood window roughly passes.
+                        await asyncio.sleep(max(_FLOOD_MAX_WAIT, 30.0))
                     await asyncio.sleep(4)
         except Exception as e:
             self.logger.debug("Typing indicator stopped for {}: {}", chat_id, e)

@@ -50,10 +50,14 @@ class _FakeRetryAfter(Exception):
         return 0.1
 
 
+class _FakeTimedOut(Exception):
+    pass
+
+
 telegram_mod.BadRequest = _FakeBadRequest
 telegram_mod.NetworkError = Exception
 telegram_mod.RetryAfter = _FakeRetryAfter
-telegram_mod.TimedOut = Exception
+telegram_mod.TimedOut = _FakeTimedOut
 
 telegram_mod.constants = types.ModuleType("telegram.constants")
 telegram_mod.constants.ChatAction = type("ChatAction", (), {})
@@ -303,6 +307,45 @@ async def main():
     assert ch7._reasoning_bufs.get(12345), "card must survive a retried edit"
     await ch7.send(final_msg("回答"))
     assert ch7._reasoning_bufs.get(12345) is None, "card must be cleaned up after not-modified"
+
+    # Long Telegram flood (retry_after 229s): the call is DROPPED instead of
+    # blocking the bot for minutes; the chat stays responsive and the
+    # reasoning card survives to cleanup.
+    class _LongFloodWait(Exception):
+        @property
+        def retry_after(self):
+            return 229.0
+
+    original_retry_after = telegram_mod.RetryAfter
+    telegram_mod.RetryAfter = _LongFloodWait
+
+    class _FloodBot(FakeApp):
+        async def send_message(self, chat_id=None, text=None, **kw):
+            raise _LongFloodWait()
+
+        async def edit_message_text(self, chat_id=None, message_id=None, text=None, **kw):
+            raise _LongFloodWait()
+
+    try:
+        CALLS.clear()
+        ch9 = make_channel()
+        ch9._app = _FloodBot()
+        # Reasoning card first send is flooded -> dropped without raising;
+        # no card registered (no message_id), next delta retries the send.
+        await ch9.send_reasoning_delta("12345", "思考内容", {"message_id": "777"})
+        assert not any(c[0] == "send" for c in CALLS), "flooded send must be dropped"
+        assert ch9._reasoning_bufs.get(12345) is None, "no card registered without a message_id"
+        # Final answer send is flooded -> dropped without raising (no stall).
+        await ch9.send(final_msg("长回答"))
+        assert ch9._reasoning_bufs.get(12345) is None, "cleanup still runs after flood"
+        # Flooded streaming edit is skipped, not raised.
+        CALLS.clear()
+        ch10 = make_channel()
+        ch10._app = _FloodBot()
+        await ch10.send_delta("12345", "增量文本", {"message_id": "777"})
+        assert not any(c[0] == "send" for c in CALLS), "flooded stream send must be dropped"
+    finally:
+        telegram_mod.RetryAfter = original_retry_after
 
     print("ALL HINT-CARD TESTS PASSED")
 
