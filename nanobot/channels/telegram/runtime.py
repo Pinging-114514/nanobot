@@ -849,7 +849,7 @@ class TelegramChannel(BaseChannel):
             or progress_event.reasoning
             or progress_event.reasoning_end
         ):
-            logger.info(
+            self.logger.info(
                 "[REASONING] tg send chat={} chars={} end={}",
                 chat_id,
                 len(msg.content or ""),
@@ -1018,6 +1018,56 @@ class TelegramChannel(BaseChannel):
         except Exception as e:
             self.logger.warning("Tool hint card update failed: {}", e)
             self._hint_bufs.pop(chat_id, None)  # Recreate on next hint
+
+    async def send_reasoning_delta(
+        self,
+        chat_id: str,
+        delta: str,
+        metadata: dict[str, Any] | None = None,
+        *,
+        stream_id: str | None = None,
+    ) -> None:
+        """Stream a reasoning/thinking chunk into the rotating 🧠 card.
+
+        Called by the channel manager for reasoning_delta progress events;
+        Telegram renders them in one editable card (see _update_reasoning_buffer)."""
+        try:
+            cid = int(chat_id)
+        except (TypeError, ValueError):
+            self.logger.warning("Invalid chat_id for reasoning: {}", chat_id)
+            return
+        thread_kwargs = self._reasoning_thread_kwargs(cid, metadata or {})
+        await self._update_reasoning_buffer(cid, delta or "", False, thread_kwargs)
+
+    async def send_reasoning_end(
+        self,
+        chat_id: str,
+        metadata: dict[str, Any] | None = None,
+        *,
+        stream_id: str | None = None,
+    ) -> None:
+        """Final refresh of the 🧠 card when the thinking segment closes."""
+        try:
+            cid = int(chat_id)
+        except (TypeError, ValueError):
+            return
+        thread_kwargs = self._reasoning_thread_kwargs(cid, metadata or {})
+        await self._update_reasoning_buffer(cid, "", True, thread_kwargs)
+
+    def _reasoning_thread_kwargs(
+        self, chat_id: int, metadata: dict[str, Any],
+    ) -> dict[str, int]:
+        """Resolve thread kwargs for reasoning cards (mirrors send())."""
+        message_thread_id = metadata.get("message_thread_id")
+        if message_thread_id is None:
+            reply_to_message_id = metadata.get("message_id")
+            if reply_to_message_id is not None:
+                message_thread_id = self._message_threads.get(
+                    (str(chat_id), reply_to_message_id),
+                )
+        if message_thread_id is not None:
+            return {"message_thread_id": message_thread_id}
+        return {}
 
     async def _update_reasoning_buffer(
         self,

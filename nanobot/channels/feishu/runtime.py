@@ -2970,6 +2970,29 @@ class FeishuChannel(BaseChannel):
             self.logger.warning("Tool hint card update failed: {}", e)
             self._hint_bufs.pop(key, None)
 
+    async def send_reasoning_delta(
+        self,
+        chat_id: str,
+        delta: str,
+        metadata: dict[str, Any] | None = None,
+        *,
+        stream_id: str | None = None,
+    ) -> None:
+        """Stream a reasoning/thinking chunk into the rotating 🧠 card.
+
+        Called by the channel manager for reasoning_delta progress events."""
+        await self._update_reasoning_card(chat_id, metadata or {}, delta or "", False)
+
+    async def send_reasoning_end(
+        self,
+        chat_id: str,
+        metadata: dict[str, Any] | None = None,
+        *,
+        stream_id: str | None = None,
+    ) -> None:
+        """Final refresh of the 🧠 card when the thinking segment closes."""
+        await self._update_reasoning_card(chat_id, metadata or {}, "", True)
+
     async def _update_reasoning_card(
         self, chat_id: str, metadata: dict[str, Any], delta: str, is_end: bool,
     ) -> None:

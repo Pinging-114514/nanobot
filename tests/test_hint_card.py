@@ -223,6 +223,20 @@ async def main():
     await ch4.send(final_msg("回答"))
     assert any(c[0] == "delete" for c in CALLS), "hint card must be deleted after final answer"
 
+    # Manager-style reasoning path: send_reasoning_delta/end primitives
+    # (the channel manager calls these, NOT send(), for reasoning events).
+    CALLS.clear()
+    ch5 = make_channel()
+    await ch5.send_reasoning_delta("12345", "正在推理：比较大小……", {"message_id": "777"})
+    sends5 = [c for c in CALLS if c[0] == "send"]
+    assert len(sends5) == 1, f"expected 1 send via primitive, got {len(sends5)}"
+    assert "🧠" in sends5[0][1], f"reasoning card must have 🧠 header: {sends5[0][1]}"
+    await ch5.send_reasoning_delta("12345", " 继续思考", {"message_id": "777"})
+    await ch5.send_reasoning_end("12345", {"message_id": "777"})
+    assert ch5._reasoning_bufs.get(12345), "reasoning buf must exist after primitives"
+    await ch5.send(final_msg("回答"))
+    assert ch5._reasoning_bufs.get(12345) is None, "reasoning card must be cleaned up"
+
     print("ALL HINT-CARD TESTS PASSED")
 
 
