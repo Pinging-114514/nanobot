@@ -345,6 +345,7 @@ _SEND_RETRY_BASE_DELAY = 0.5  # seconds, doubled each retry
 _STREAM_EDIT_INTERVAL_DEFAULT = 0.6  # min seconds between edit_message_text calls
 _HINT_MAX_LINES = 15  # max tool-call lines kept in the rotating hint card
 _REASONING_MAX_CHARS = 2500  # max reasoning text kept in the rotating thinking card
+_STREAM_MIN_CHARS = 16  # enough new content to justify a stream edit (avoids churn on slow APIs)
 _FLOOD_MAX_WAIT = 15.0  # max seconds we wait on a Telegram flood retry_after before dropping the call
 _SEND_CHUNK_INTERVAL = 0.3  # min seconds between message chunks to avoid burst flood
 
@@ -369,6 +370,7 @@ class _StreamBuf:
     text: str = ""
     message_id: int | None = None
     last_edit: float = 0.0
+    last_edit_len: int = 0  # len(text) at the last edit, for content-aware pacing
     stream_id: str | None = None
 
 
@@ -495,7 +497,7 @@ class TelegramChannel(BaseChannel):
         self._hint_bufs: dict[int, dict[str, Any]] = {}  # chat_id -> rotating tool-hint card {message_id, lines}
         self._reasoning_bufs: dict[int, dict[str, Any]] = {}  # chat_id -> rotating reasoning card {message_id, text, last_edit}
         self._edit_gates: dict[int, float] = {}  # chat_id -> last edit time (per-chat edit rate limit)
-        self._edit_gate_interval = 1.2  # min seconds between edits per chat
+        self._edit_gate_interval = 0.8  # min seconds between edits per chat
         self._inbound_buffers: dict[str, list[_QueuedTelegramUpdate]] = {}
         self._inbound_workers: dict[str, asyncio.Task[None]] = {}
         self._rich_send_disabled: bool = False  # Latch off if Bot API < 10.1
@@ -1380,6 +1382,11 @@ class TelegramChannel(BaseChannel):
             if len(buf.text) > TELEGRAM_MAX_MESSAGE_LEN:
                 await self._flush_stream_overflow(int_chat_id, buf, stream_thread_kwargs)
                 buf.last_edit = now
+                buf.last_edit_len = len(buf.text)
+                return
+            if len(buf.text) - buf.last_edit_len < _STREAM_MIN_CHARS:
+                # Not enough new content since the last edit; keep
+                # accumulating instead of editing near-identical text.
                 return
             preview = _strip_md_block(buf.text)
             try:
@@ -1391,6 +1398,7 @@ class TelegramChannel(BaseChannel):
                     text=preview,
                 )
                 buf.last_edit = now
+                buf.last_edit_len = len(buf.text)
             except FloodWaitError:
                 # Flooded: keep accumulating, skip this intermediate edit.
                 buf.last_edit = now
