@@ -7,6 +7,7 @@ Verifies:
 
 import asyncio
 import sys
+import time
 import types
 from unittest.mock import MagicMock
 
@@ -236,6 +237,53 @@ async def main():
     assert ch5._reasoning_bufs.get(12345), "reasoning buf must exist after primitives"
     await ch5.send(final_msg("回答"))
     assert ch5._reasoning_bufs.get(12345) is None, "reasoning card must be cleaned up"
+
+    # reasoning_end with no new content: the edit is skipped (no
+    # 'message is not modified') and the card stays managed for cleanup.
+    CALLS.clear()
+    ch6 = make_channel()
+    await ch6.send_reasoning_delta("12345", "思考内容A", {"message_id": "777"})
+    await ch6.send_reasoning_end("12345", {"message_id": "777"})
+    edits6 = [c for c in CALLS if c[0] == "edit"]
+    assert len(edits6) == 0, f"no-change reasoning_end must skip the edit, got {len(edits6)}"
+    assert ch6._reasoning_bufs.get(12345), "card must stay managed after no-change end"
+    await ch6.send(final_msg("回答"))
+    dels6 = [c for c in CALLS if c[0] == "delete"]
+    assert len(dels6) == 1, f"no-change card must still be deleted, got {len(dels6)}"
+    assert ch6._reasoning_bufs.get(12345) is None, "buf must clear after cleanup"
+
+    # A 'message is not modified' BadRequest must NOT orphan the card:
+    # the next delta retries the edit on the same card, and the final
+    # answer still deletes it.
+    class _NotModifiedBot(FakeApp):
+        def __init__(self):
+            super().__init__()
+            self._fail_once = True
+
+        async def edit_message_text(self, chat_id=None, message_id=None, text=None, **kw):
+            if self._fail_once:
+                self._fail_once = False
+                raise _FakeBadRequest(
+                    "Message is not modified: specified new message content "
+                    "and reply markup are exactly the same as a current "
+                    "content and reply markup of the message",
+                )
+            CALLS.append(("edit", message_id, text))
+
+    CALLS.clear()
+    ch7 = make_channel()
+    ch7._app = _NotModifiedBot()
+    await ch7.send_reasoning_delta("12345", "思考B", {"message_id": "777"})
+    buf7 = ch7._reasoning_bufs[12345]
+    buf7["last_edit"] = time.monotonic() - 5  # force the edit branch
+    await ch7.send_reasoning_delta("12345", "思考B继续", {"message_id": "777"})
+    assert ch7._reasoning_bufs.get(12345), "not-modified must not orphan the card"
+    buf7 = ch7._reasoning_bufs[12345]
+    buf7["last_edit"] = time.monotonic() - 5
+    await ch7.send_reasoning_delta("12345", "思考B尾声", {"message_id": "777"})
+    assert ch7._reasoning_bufs.get(12345), "card must survive a retried edit"
+    await ch7.send(final_msg("回答"))
+    assert ch7._reasoning_bufs.get(12345) is None, "card must be cleaned up after not-modified"
 
     print("ALL HINT-CARD TESTS PASSED")
 

@@ -1086,8 +1086,16 @@ class TelegramChannel(BaseChannel):
                 )
                 self._reasoning_bufs[chat_id] = {
                     "message_id": sent.message_id, "text": text, "last_edit": now,
+                    "sent": text,
                 }
             elif is_end or (now - buf["last_edit"]) >= _STREAM_EDIT_INTERVAL_DEFAULT:
+                if buf.get("sent") == text:
+                    # Nothing new since the last edit: keep the card managed
+                    # (skip the edit to avoid the 'message is not modified'
+                    # BadRequest, which used to orphan the card so the final
+                    # answer cleanup could no longer delete it).
+                    buf["text"] = text
+                    return
                 await self._call_with_retry(
                     app.bot.edit_message_text,
                     chat_id=chat_id, message_id=buf["message_id"],
@@ -1095,10 +1103,21 @@ class TelegramChannel(BaseChannel):
                     parse_mode="HTML",
                 )
                 buf["text"] = text
+                buf["sent"] = text
                 buf["last_edit"] = now
             else:
                 # Throttled: accumulate without hitting the API each delta.
                 buf["text"] = text
+        except BadRequest as e:
+            if self._is_not_modified_error(e):
+                # Already current — keep the card so cleanup still finds it.
+                buf = self._reasoning_bufs.get(chat_id)
+                if buf is not None:
+                    buf["text"] = text
+                    buf["sent"] = text
+                return
+            self.logger.warning("Reasoning card update failed: {}", e)
+            self._reasoning_bufs.pop(chat_id, None)  # Recreate on next delta
         except Exception as e:
             self.logger.warning("Reasoning card update failed: {}", e)
             self._reasoning_bufs.pop(chat_id, None)  # Recreate on next delta

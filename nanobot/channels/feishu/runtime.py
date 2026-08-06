@@ -3029,12 +3029,21 @@ class FeishuChannel(BaseChannel):
                     buf["text"] = text
                     buf["last_edit"] = now
                 else:
-                    self._reasoning_bufs.pop(key, None)
+                    # Resend failed: keep the stale buf. The next cycle
+                    # recalls a missing message (best-effort) and retries,
+                    # instead of orphaning the card so cleanup loses it.
+                    buf["text"] = text
             else:
                 buf["text"] = text
         except Exception as e:
+            # Keep the buf registered so the final-answer cleanup can still
+            # recall the card; only the message_id is potentially stale and
+            # recall is best-effort anyway.
             self.logger.warning("Reasoning card update failed: {}", e)
-            self._reasoning_bufs.pop(key, None)
+            if buf is not None and buf.get("message_id"):
+                buf["text"] = text
+            else:
+                self._reasoning_bufs.pop(key, None)
 
     async def _cleanup_hints(
         self, chat_id: str, metadata: dict[str, Any] | None = None,
