@@ -494,6 +494,8 @@ class TelegramChannel(BaseChannel):
         self._stream_bufs: dict[str, _StreamBuf] = {}  # chat_id -> streaming state
         self._hint_bufs: dict[int, dict[str, Any]] = {}  # chat_id -> rotating tool-hint card {message_id, lines}
         self._reasoning_bufs: dict[int, dict[str, Any]] = {}  # chat_id -> rotating reasoning card {message_id, text, last_edit}
+        self._edit_gates: dict[int, float] = {}  # chat_id -> last edit time (per-chat edit rate limit)
+        self._edit_gate_interval = 1.2  # min seconds between edits per chat
         self._inbound_buffers: dict[str, list[_QueuedTelegramUpdate]] = {}
         self._inbound_workers: dict[str, asyncio.Task[None]] = {}
         self._rich_send_disabled: bool = False  # Latch off if Bot API < 10.1
@@ -1050,6 +1052,8 @@ class TelegramChannel(BaseChannel):
                 )
                 self._hint_bufs[chat_id] = {"message_id": sent.message_id, "lines": lines}
             else:
+                if wait := self._edit_gate(chat_id):
+                    await asyncio.sleep(wait)
                 await self._call_with_retry(
                     app.bot.edit_message_text,
                     chat_id=chat_id, message_id=buf["message_id"], text=text,
@@ -1146,6 +1150,8 @@ class TelegramChannel(BaseChannel):
                     # answer cleanup could no longer delete it).
                     buf["text"] = text
                     return
+                if wait := self._edit_gate(chat_id):
+                    await asyncio.sleep(wait)
                 await self._call_with_retry(
                     app.bot.edit_message_text,
                     chat_id=chat_id, message_id=buf["message_id"],
@@ -1177,6 +1183,18 @@ class TelegramChannel(BaseChannel):
         except Exception as e:
             self.logger.warning("Reasoning card update failed: {}", e)
             self._reasoning_bufs.pop(chat_id, None)  # Recreate on next delta
+
+    def _edit_gate(self, chat_id: int, min_interval: float | None = None) -> float:
+        """Return seconds to wait so per-chat edits stay under Telegram's
+        ~1/s limit. All edit streams (reasoning card, stream preview, hint
+        card) share this gate to avoid summing past the budget."""
+        if min_interval is None:
+            min_interval = self._edit_gate_interval
+        now = time.monotonic()
+        last = self._edit_gates.get(chat_id, 0.0)
+        wait = max(0.0, last + min_interval - now)
+        self._edit_gates[chat_id] = max(now, last + min_interval)
+        return wait
 
     def _reasoning_card_text(self, text: str) -> str:
         """Wrap reasoning content in a Telegram blockquote so the thinking
@@ -1273,6 +1291,8 @@ class TelegramChannel(BaseChannel):
             primary_html = html_chunks[0]
             extra_html_chunks = html_chunks[1:]
             try:
+                if wait := self._edit_gate(int_chat_id):
+                    await asyncio.sleep(wait)
                 await self._call_with_retry(
                     self._app.bot.edit_message_text,
                     chat_id=int_chat_id, message_id=buf.message_id,
@@ -1295,6 +1315,8 @@ class TelegramChannel(BaseChannel):
                 # Fall back to raw markdown (not HTML) so users don't see raw tags.
                 primary_plain = split_message(raw_text, TELEGRAM_MAX_MESSAGE_LEN)[0] if len(raw_text) > TELEGRAM_MAX_MESSAGE_LEN else raw_text
                 try:
+                    if wait := self._edit_gate(int_chat_id):
+                        await asyncio.sleep(wait)
                     await self._call_with_retry(
                         self._app.bot.edit_message_text,
                         chat_id=int_chat_id, message_id=buf.message_id,
@@ -1361,6 +1383,8 @@ class TelegramChannel(BaseChannel):
                 return
             preview = _strip_md_block(buf.text)
             try:
+                if wait := self._edit_gate(int_chat_id):
+                    await asyncio.sleep(wait)
                 await self._call_with_retry(
                     self._app.bot.edit_message_text,
                     chat_id=int_chat_id, message_id=buf.message_id,
