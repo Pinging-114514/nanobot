@@ -347,7 +347,7 @@ _HINT_MAX_LINES = 15  # max tool-call lines kept in the rotating hint card
 _REASONING_MAX_CHARS = 2500  # max reasoning text kept in the rotating thinking card
 _STREAM_MIN_CHARS = 16  # enough new content to justify a stream edit (avoids churn on slow APIs)
 _FLOOD_MAX_WAIT = 15.0  # max seconds we wait on a Telegram flood retry_after before dropping the call
-_SEND_CHUNK_INTERVAL = 0.3  # min seconds between message chunks to avoid burst flood
+_SEND_CHUNK_INTERVAL = 0.6  # min seconds between message chunks to avoid burst flood
 
 
 class FloodWaitError(Exception):
@@ -957,8 +957,9 @@ class TelegramChannel(BaseChannel):
                     # Drop this call; streaming/hint/final paths handle it.
                     self.logger.warning(
                         "Flood Control: retry_after {:.1f}s exceeds limit "
-                        "{:.0f}s; dropping call",
+                        "{:.0f}s; dropping call {}",
                         delay, _FLOOD_MAX_WAIT,
+                        getattr(fn, "__name__", str(fn)),
                     )
                     raise FloodWaitError(delay) from e
                 if attempt == _SEND_MAX_RETRIES:
