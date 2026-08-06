@@ -688,12 +688,6 @@ class ChannelManager:
                     # a low-emphasis UI affordance keep the base no-op and the
                     # content silently drops here.
                     channel = self.channels.get(msg.channel)
-                    logger.info(
-                        "[REASONING] dispatch channel={} found={} show={}",
-                        msg.channel,
-                        channel is not None,
-                        getattr(channel, "show_reasoning", None) if channel else None,
-                    )
                     if channel is not None and channel.show_reasoning:
                         await self._send_with_retry(channel, msg)
                     continue
