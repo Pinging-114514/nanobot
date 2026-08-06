@@ -1165,6 +1165,9 @@ class TelegramChannel(BaseChannel):
                 buf["text"] = text
                 buf["sent"] = text
                 buf["last_edit"] = now
+                self.logger.info(
+                    "[REASON-EDIT] chat={} total={} chars", chat_id, len(text),
+                )
             else:
                 # Throttled: accumulate without hitting the API each delta.
                 buf["text"] = text
@@ -1389,9 +1392,14 @@ class TelegramChannel(BaseChannel):
             if len(buf.text) - buf.last_edit_len < _STREAM_MIN_CHARS:
                 # Not enough new content since the last edit; keep
                 # accumulating instead of editing near-identical text.
+                self.logger.info(
+                    "[STREAM-SKIP] chat={} pending={} chars (< {})",
+                    int_chat_id, len(buf.text) - buf.last_edit_len, _STREAM_MIN_CHARS,
+                )
                 return
             preview = _strip_md_block(buf.text)
             try:
+                new_chars = len(buf.text) - buf.last_edit_len
                 if wait := self._edit_gate(int_chat_id):
                     await asyncio.sleep(wait)
                 await self._call_with_retry(
@@ -1401,6 +1409,10 @@ class TelegramChannel(BaseChannel):
                 )
                 buf.last_edit = now
                 buf.last_edit_len = len(buf.text)
+                self.logger.info(
+                    "[STREAM-EDIT] chat={} +{} chars total={}",
+                    int_chat_id, new_chars, len(buf.text),
+                )
             except FloodWaitError:
                 # Flooded: keep accumulating, skip this intermediate edit.
                 buf.last_edit = now
