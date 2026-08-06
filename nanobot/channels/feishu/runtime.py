@@ -2490,6 +2490,7 @@ class FeishuChannel(BaseChannel):
                 await self._update_hint_card(
                     msg.chat_id, msg.metadata, hint,
                     replace=bool(msg.metadata.get("_hint_replace")),
+                    line_key=msg.metadata.get("_hint_line"),
                 )
                 return
 
@@ -2926,16 +2927,24 @@ class FeishuChannel(BaseChannel):
         self, chat_id: str, metadata: dict[str, Any], hint: str,
         *,
         replace: bool = False,
+        line_key: str | None = None,
     ) -> None:
         """Rotate tool hints into a single card; recalled when the final answer lands.
 
         ``replace=True`` clears previous lines first (used by subagent
-        progress so each round replaces the last instead of appending)."""
+        progress so each round replaces the last instead of appending).
+        ``line_key`` replaces only the row for that subagent label so
+        concurrent subagents keep their own lines."""
         loop = asyncio.get_running_loop()
         rid_type = "chat_id" if chat_id.startswith("oc_") else "open_id"
         key = self._stream_key(chat_id, metadata)
         buf = self._hint_bufs.get(key)
         lines = [] if replace else (list(buf["lines"]) if buf else [])
+        if line_key:
+            # Rows carry a 🤖/✅/❌ emoji before '子代理 [label]', so match
+            # the marker as a substring, not a prefix.
+            marker = f"子代理 [{line_key}]"
+            lines = [ln for ln in lines if marker not in ln]
         for ln in (hint or "").splitlines():
             ln = ln.strip()
             if ln:

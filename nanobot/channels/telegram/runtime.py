@@ -864,6 +864,7 @@ class TelegramChannel(BaseChannel):
                 await self._update_hint_buffer(
                     chat_id, msg.content, reply_params, thread_kwargs,
                     replace=bool(msg.metadata.get("_hint_replace")),
+                    line_key=msg.metadata.get("_hint_line"),
                 )
                 return
 
@@ -977,14 +978,23 @@ class TelegramChannel(BaseChannel):
         thread_kwargs: dict[str, int],
         *,
         replace: bool = False,
+        line_key: str | None = None,
     ) -> None:
         """Rotate tool hints into a single per-chat card (edit in place).
 
         ``replace=True`` clears previous lines first (used by subagent
-        progress so each round replaces the last instead of appending)."""
+        progress so each round replaces the last instead of appending).
+        ``line_key`` replaces only the row for that subagent label, so
+        concurrent subagents each keep their own line."""
         app = self._require_app()
         buf = self._hint_bufs.get(chat_id)
         lines = [] if replace else (list(buf["lines"]) if buf else [])
+        if line_key:
+            # Replace only this subagent's row; keep other subagents' rows.
+            # Rows carry a 🤖/✅/❌ emoji before '子代理 [label]', so match
+            # the marker as a substring, not a prefix.
+            marker = f"子代理 [{line_key}]"
+            lines = [ln for ln in lines if marker not in ln]
         for ln in (hint or "").splitlines():
             ln = ln.strip()
             if ln:

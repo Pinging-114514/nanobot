@@ -194,19 +194,19 @@ async def main():
     assert len(r_deletes) == 2, f"expected 2 card deletes (hint+reasoning), got {r_deletes}"
     assert ch3._hint_bufs.get(12345) is None and ch3._reasoning_bufs.get(12345) is None
 
-    # Subagent progress uses _hint_replace: each round REPLACES the card
-    # (no accumulating '第 N 轮' lines), final delete still happens.
+    # Subagent progress uses line-keyed rows: each round replaces only its
+    # own subagent's row (no accumulating '第 N 轮' lines), concurrent
+    # subagents keep separate rows, final delete still happens.
     CALLS.clear()
     ch4 = make_channel()
 
-    def sub_progress(round_no: int) -> OutboundMessage:
+    def sub_progress(round_no: int, label: str = "x") -> OutboundMessage:
+        content = f"🤖 子代理 [{label}] 执行中 (第 {round_no} 轮)"
         return OutboundMessage(
             channel="telegram", chat_id="12345",
-            event=ProgressEvent(
-                content=f"🤖 子代理 [x] 执行中 (第 {round_no} 轮)", tool_hint=True,
-            ),
-            metadata={"_hint_replace": True},
-            content=f"🤖 子代理 [x] 执行中 (第 {round_no} 轮)",
+            event=ProgressEvent(content=content, tool_hint=True),
+            metadata={"_hint_line": label},
+            content=content,
         )
 
     await ch4.send(sub_progress(1))
@@ -215,7 +215,7 @@ async def main():
     await ch4.send(sub_progress(2))  # duplicate round 2
     sends4 = [c for c in CALLS if c[0] == "send"]
     edits4 = [c for c in CALLS if c[0] == "edit"]
-    # replace resets lines, so every message is a fresh send or edit with ONE line
+    # one line per subagent: round 2 replaces round 1 in place
     assert len(sends4) == 1, f"expected 1 send, got {len(sends4)}"
     assert "(第 1 轮)" in sends4[0][1] and "(第 2 轮)" not in sends4[0][1]
     assert len(edits4) == 3, f"expected 3 replace edits, got {len(edits4)}"
@@ -223,6 +223,25 @@ async def main():
     assert "(第 2 轮)" in last4 and "(第 1 轮)" not in last4, f"replace must not accumulate: {last4}"
     await ch4.send(final_msg("回答"))
     assert any(c[0] == "delete" for c in CALLS), "hint card must be deleted after final answer"
+
+    # Two concurrent subagents: each keeps its own row — B's update must NOT
+    # wipe A's line, and A's next round only replaces A's row.
+    CALLS.clear()
+    ch8 = make_channel()
+    await ch8.send(sub_progress(1, label="A"))
+    await ch8.send(sub_progress(1, label="B"))
+    await ch8.send(sub_progress(2, label="A"))
+    last8 = [c for c in CALLS if c[0] == "edit"]
+    if not last8:
+        last8 = [c for c in CALLS if c[0] == "send"]
+    card8 = last8[-1][-1]
+    assert "[A]" in card8 and "[B]" in card8, f"both subagents must coexist: {card8}"
+    assert "(第 2 轮)" in card8, f"A must show round 2: {card8}"
+    assert "(第 1 轮)" not in card8.replace("子代理 [B]", "").replace("执行中", "") or "子代理 [B] 执行中 (第 1 轮)" in card8, card8
+    # B's own line must still be round 1 (A's update didn't touch it)
+    assert "[B] 执行中 (第 1 轮)" in card8, f"B row must survive A's update: {card8}"
+    await ch8.send(final_msg("回答"))
+    assert ch8._hint_bufs.get(12345) is None, "hint card must be deleted after final answer"
 
     # Manager-style reasoning path: send_reasoning_delta/end primitives
     # (the channel manager calls these, NOT send(), for reasoning events).

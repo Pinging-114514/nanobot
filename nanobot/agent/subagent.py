@@ -508,7 +508,10 @@ class SubagentManager:
             if self._last_subagent_progress.get(key) == iteration:
                 return
             self._last_subagent_progress[key] = iteration
-        metadata: dict[str, Any] = {"_hint_replace": True}
+        # Line-keyed so the channel replaces only THIS subagent's line;
+        # concurrent subagents each keep their own row instead of
+        # overwriting each other on the shared card.
+        metadata: dict[str, Any] = {"_hint_line": label}
         if origin_message_id:
             metadata["message_id"] = origin_message_id
         await self.bus.publish_outbound(
