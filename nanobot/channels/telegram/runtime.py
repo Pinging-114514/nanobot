@@ -345,7 +345,8 @@ _SEND_RETRY_BASE_DELAY = 0.5  # seconds, doubled each retry
 _STREAM_EDIT_INTERVAL_DEFAULT = 0.6  # min seconds between edit_message_text calls
 _HINT_MAX_LINES = 15  # max tool-call lines kept in the rotating hint card
 _REASONING_MAX_CHARS = 2500  # max reasoning text kept in the rotating thinking card
-_STREAM_MIN_CHARS = 16  # enough new content to justify a stream edit (avoids churn on slow APIs)
+_STREAM_MIN_CHARS = 24  # enough new content to justify a stream edit (avoids churn on slow APIs)
+_REASONING_EDIT_INTERVAL = 2.0  # reasoning card updates even slower than the shared gate
 _FLOOD_MAX_WAIT = 15.0  # max seconds we wait on a Telegram flood retry_after before dropping the call
 _SEND_CHUNK_INTERVAL = 0.6  # min seconds between message chunks to avoid burst flood
 
@@ -497,7 +498,7 @@ class TelegramChannel(BaseChannel):
         self._hint_bufs: dict[int, dict[str, Any]] = {}  # chat_id -> rotating tool-hint card {message_id, lines}
         self._reasoning_bufs: dict[int, dict[str, Any]] = {}  # chat_id -> rotating reasoning card {message_id, text, last_edit}
         self._edit_gates: dict[int, float] = {}  # chat_id -> last edit time (per-chat edit rate limit)
-        self._edit_gate_interval = 0.8  # min seconds between edits per chat
+        self._edit_gate_interval = 1.2  # min seconds between edits per chat
         self._inbound_buffers: dict[str, list[_QueuedTelegramUpdate]] = {}
         self._inbound_workers: dict[str, asyncio.Task[None]] = {}
         self._rich_send_disabled: bool = False  # Latch off if Bot API < 10.1
@@ -1153,7 +1154,7 @@ class TelegramChannel(BaseChannel):
                     # answer cleanup could no longer delete it).
                     buf["text"] = text
                     return
-                if wait := self._edit_gate(chat_id):
+                if wait := self._edit_gate(chat_id, min_interval=_REASONING_EDIT_INTERVAL):
                     await asyncio.sleep(wait)
                 await self._call_with_retry(
                     app.bot.edit_message_text,
