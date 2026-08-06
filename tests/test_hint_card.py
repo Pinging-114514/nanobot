@@ -115,6 +115,7 @@ def make_channel():
     ch._message_threads = {}
     ch._edit_gates = {}
     ch._edit_gate_interval = 0.0
+    ch._reasoning_min_chars = 0
     ch.logger = MagicMock()
     return ch
 

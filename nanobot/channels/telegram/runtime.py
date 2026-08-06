@@ -345,6 +345,7 @@ _SEND_RETRY_BASE_DELAY = 0.5  # seconds, doubled each retry
 _STREAM_EDIT_INTERVAL_DEFAULT = 0.6  # min seconds between edit_message_text calls
 _HINT_MAX_LINES = 15  # max tool-call lines kept in the rotating hint card
 _REASONING_MAX_CHARS = 2500  # max reasoning text kept in the rotating thinking card
+_REASONING_MIN_CHARS = 40  # enough new thinking content to justify a card edit
 _STREAM_MIN_CHARS = 24  # enough new content to justify a stream edit (avoids churn on slow APIs)
 _REASONING_EDIT_INTERVAL = 2.0  # reasoning card updates even slower than the shared gate
 _FLOOD_MAX_WAIT = 15.0  # max seconds we wait on a Telegram flood retry_after before dropping the call
@@ -1152,6 +1153,18 @@ class TelegramChannel(BaseChannel):
                     # (skip the edit to avoid the 'message is not modified'
                     # BadRequest, which used to orphan the card so the final
                     # answer cleanup could no longer delete it).
+                    buf["text"] = text
+                    return
+                min_chars = getattr(self, "_reasoning_min_chars", _REASONING_MIN_CHARS)
+                if not is_end and len(text) - len(buf.get("sent", "")) < min_chars:
+                    # Not enough new thinking yet: skip the edit so the card
+                    # doesn't visibly advance one char at a time (this also
+                    # stops re-editing the same 2500-char card once truncated,
+                    # which was flooding the API).
+                    self.logger.info(
+                        "[REASON-SKIP] chat={} pending={} chars (< {})",
+                        chat_id, len(text) - len(buf.get("sent", "")), min_chars,
+                    )
                     buf["text"] = text
                     return
                 if wait := self._edit_gate(chat_id, min_interval=_REASONING_EDIT_INTERVAL):
