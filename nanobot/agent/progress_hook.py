@@ -179,6 +179,11 @@ class AgentProgressHook(AgentHook):
 
     async def emit_reasoning(self, reasoning_content: str | None) -> None:
         """Publish a reasoning chunk; channel plugins decide whether to render."""
+        logger.info(
+            "[REASONING] emit {} chars (on_progress={})",
+            len(reasoning_content or ""),
+            self._on_progress is not None,
+        )
         if (
             self._on_progress
             and reasoning_content

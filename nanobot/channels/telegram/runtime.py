@@ -849,6 +849,12 @@ class TelegramChannel(BaseChannel):
             or progress_event.reasoning
             or progress_event.reasoning_end
         ):
+            logger.info(
+                "[REASONING] tg send chat={} chars={} end={}",
+                chat_id,
+                len(msg.content or ""),
+                bool(progress_event.reasoning_end),
+            )
             await self._update_reasoning_buffer(
                 chat_id, msg.content or "", bool(progress_event.reasoning_end),
                 thread_kwargs,
