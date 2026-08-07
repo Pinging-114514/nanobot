@@ -805,6 +805,38 @@ class JsonlSessionStore:
                 return self.session_payload(repaired)
             return None
 
+    def update_session_metadata(self, key: str, patch: dict[str, Any]) -> None:
+        """Merge *patch* into a session's metadata, rewriting only the
+        metadata line of the JSONL file (no transcript rewrite).
+
+        A value of ``None`` removes the field. Used by restart recovery to
+        clear the in-flight marker without touching the full session."""
+        path = self.get_session_path(key)
+        if not path.exists():
+            return
+        try:
+            with open(path, encoding="utf-8") as f:
+                lines = f.readlines()
+            if not lines:
+                return
+            first = json.loads(lines[0].strip())
+            if first.get("_type") != "metadata":
+                return
+            meta = first.get("metadata")
+            if not isinstance(meta, dict):
+                meta = {}
+            for k, v in patch.items():
+                if v is None:
+                    meta.pop(k, None)
+                else:
+                    meta[k] = v
+            first["metadata"] = meta
+            lines[0] = json.dumps(first, ensure_ascii=False) + "\n"
+            with open(path, "w", encoding="utf-8") as f:
+                f.writelines(lines)
+        except Exception as e:
+            logger.warning("update_session_metadata failed for {}: {}", key, e)
+
     def read_metadata(self, key: str) -> SessionMetadataPayload | None:
         path = self.get_session_path(key)
         if not path.exists():
@@ -1169,6 +1201,12 @@ class SessionManager:
     def read_session_metadata(self, key: str) -> dict[str, Any] | None:
         """Read session metadata without loading the transcript."""
         return cast(dict[str, Any] | None, self._store.read_metadata(key))
+
+    def update_session_metadata(self, key: str, patch: dict[str, Any]) -> None:
+        """Merge *patch* into a session's metadata (``None`` removes a field)
+        without rewriting the transcript. Used by restart recovery to clear
+        the in-flight marker."""
+        self._store.update_session_metadata(key, patch)
 
     def list_sessions(self) -> list[dict[str, Any]]:
         return cast(list[dict[str, Any]], self._store.list_sessions())

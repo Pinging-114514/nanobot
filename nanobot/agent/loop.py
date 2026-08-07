@@ -1613,6 +1613,16 @@ class AgentLoop:
         await ctx.delivery.started()
         if ctx.kind is TurnKind.USER:
             self.workspace_scopes.persist_message_scope(session, msg)
+        # Mark the turn as in-flight so a gateway restart can offer to resume
+        # it (the flag is cleared once the turn is persisted).
+        if not ctx.ephemeral and ctx.kind is TurnKind.USER:
+            try:
+                session.metadata["agent_busy"] = True
+                session.metadata["busy_at"] = time.time()
+                session.metadata["last_user_message"] = (msg.content or "")[:200]
+                self.sessions.save(session)
+            except Exception:
+                pass
 
         if self._restore_runtime_checkpoint(session):
             self.sessions.save(session)
@@ -1880,6 +1890,9 @@ class AgentLoop:
             )
         self._clear_pending_user_turn(session)
         self._clear_runtime_checkpoint(session)
+        if not ctx.ephemeral and ctx.kind is TurnKind.USER:
+            # Turn finished: clear the in-flight marker used for resume-on-restart.
+            session.metadata.pop("agent_busy", None)
         self.sessions.save(session)
         if not ctx.ephemeral:
             await self.runtime_event_publisher.session_turn_persisted(

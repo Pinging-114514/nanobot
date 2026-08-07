@@ -2,6 +2,7 @@
 
 import asyncio
 import signal
+import time
 from collections.abc import Awaitable, Callable, Coroutine, Iterable
 from contextlib import suppress
 from pathlib import Path
@@ -281,6 +282,78 @@ async def _close_gateway_runtime(
     if runtime_tasks is not None and runtime_tasks.done():
         with suppress(asyncio.CancelledError, Exception):
             await runtime_tasks
+
+
+async def _resume_interrupted_turns(
+    agent: Any,
+    channels: Any,
+    session_manager: Any,
+    policy: str,
+) -> None:
+    """After a restart, surface sessions whose last turn was interrupted.
+
+    Only 'fresh' interruptions (busy marker newer than 24h) are surfaced;
+    older markers are silently cleaned so stale flags can't pile up. Each
+    session is handled at most once and its marker cleared, so a restart
+    can't spam repeated reminders.
+    """
+    if policy == "off":
+        return
+    await asyncio.sleep(4)  # let channels come online first
+    try:
+        from nanobot.bus.events import OutboundMessage
+
+        now = time.time()
+        notified = cleaned = 0
+        for info in session_manager.list_sessions():
+            key = info.get("key")
+            if not key or ":" not in key:
+                continue
+            try:
+                meta = session_manager.read_session_metadata(key) or {}
+            except Exception:
+                continue
+            inner = meta.get("metadata") or {}
+            if not isinstance(inner, dict) or inner.get("agent_busy") is not True:
+                continue
+            busy_at = float(inner.get("busy_at") or 0)
+            # The marker is single-use: clear it regardless of what we do.
+            try:
+                session_manager.update_session_metadata(key, {"agent_busy": None})
+            except Exception:
+                pass
+            if busy_at <= now - 24 * 3600:
+                cleaned += 1  # stale flag from long ago: silently drop
+                continue
+            channel_name, _, chat_id = key.partition(":")
+            channel = channels.get_channel(channel_name)
+            if channel is None:
+                cleaned += 1
+                continue
+            last_user = (inner.get("last_user_message") or "")[:120] or "（无记录）"
+            out = OutboundMessage(
+                channel=channel_name,
+                chat_id=chat_id,
+                content=(
+                    "⚠️ 检测到上次可能有未完成的任务"
+                    f"（重启前最后请求：{last_user}）。\n"
+                    "回复「继续」可以接着完成；如果任务已完成，忽略这条即可。"
+                ),
+                metadata={},
+            )
+            try:
+                await channel.send(out)
+                notified += 1
+            except Exception:
+                pass
+        if notified or cleaned:
+            logger.info(
+                "resume scan: {} interrupted turn(s) notified, "
+                "{} stale marker(s) cleaned",
+                notified, cleaned,
+            )
+    except Exception as exc:
+        logger.warning("resume scan failed: {}", exc)
 
 
 def _run_gateway(
@@ -852,6 +925,15 @@ def _run_gateway(
                 ),
                 asyncio.create_task(agent.run(), name="nanobot-agent-loop"),
                 asyncio.create_task(channels.start_all(), name="nanobot-channels"),
+                asyncio.create_task(
+                    _resume_interrupted_turns(
+                        agent,
+                        channels,
+                        session_manager,
+                        config.gateway.resume_policy,
+                    ),
+                    name="nanobot-resume-turns",
+                ),
                 asyncio.create_task(
                     run_local_trigger_queue(
                         store=trigger_store,
